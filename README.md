@@ -1,2 +1,150 @@
 # SwiftletCore
-使用 swift 编写的网络内核
+
+使用 Swift 编写的纯血统网络代理内核。基于 Apple SwiftNIO 异步事件驱动框架，专为 iOS/visionOS `PacketTunnelProvider` 网络扩展设计，利用编译期 ARC 替代 GC 延迟，内存占用控制在 5MB–8MB。
+
+---
+
+## 架构总览
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     Inbound (入站)                            │
+│  Socks5/        ← SOCKS5 协议服务器 (RFC 1928)                │
+│  HTTP/          ← HTTP CONNECT 代理服务器 (RFC 7231)          │
+├──────────────────────────────────────────────────────────────┤
+│                     Stack (协议栈)                            │
+│  IPHeader/      ← IPv4/IPv6 零拷贝数据包解析器                 │
+│  TCPHeader/     ← TCP 段解析器 + SYN-ACK 构建器               │
+│  TCPChecksum    ← TCP 校验和计算 (IPv4/IPv6)                  │
+│  TCPSession     ← 4元组会话跟踪 + NAT 表                      │
+│  TUN2Socks      ← 虚拟 TCP 3次握手 + SOCKS5 桥接              │
+├──────────────────────────────────────────────────────────────┤
+│                     Router (路由)                             │
+│  TrieNode       ← 域名后缀 Trie 树 (Radix Tree)              │
+│  RoutingRule    ← CIDR 最长前缀匹配 / 域名关键词匹配           │
+│  AsyncDNS       ← UDP + DoH 异步 DNS 解析器 (TTL 缓存)       │
+│  RoutingEngine  ← 中央路由决策引擎 (Actor)                    │
+├──────────────────────────────────────────────────────────────┤
+│                    Outbound (出站)                            │
+│  Shadowsocks/   ← AEAD 加密 (AES-GCM / ChaCha20-Poly1305)    │
+│  Trojan/        ← Trojan-TLS 出站协议                         │
+│  TLS/           ← REALITY TLS ClientHello 修改器              │
+│  VLESS/         ← VLESS-REALITY + WebSocket 出站引擎          │
+│  VMess/         ← VMess v1 协议 (MD5 + AES-128-CFB)          │
+│  AnyTLS/        ← 对称字节混淆引擎 (XOR + xorshift32)         │
+│  HTTP/          ← HTTP CONNECT 出站隧道                       │
+│  UDP/           ← UDP 会话关联管理器 (WireGuard / Hysteria2)   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 支持的协议
+
+### 入站协议 (Inbound)
+
+| 协议 | 模块 | 说明 |
+|------|------|------|
+| **SOCKS5** | `Inbound/Socks5/` | 完整 RFC 1928 实现，支持 `NO AUTH` (0x00) 认证和 `CONNECT` (0x01) 命令，IPv4 / IPv6 / 域名地址类型，异步双向流转发 |
+| **HTTP CONNECT** | `Inbound/HTTP/` | HTTP 代理服务器，解析 `CONNECT host:port` 请求，返回 `HTTP/1.1 200`，转入零拷贝原始流转发 |
+
+### Layer 3/4 协议 (Stack)
+
+| 协议 | 模块 | 说明 |
+|------|------|------|
+| **IPv4** | `Stack/IPHeader.swift` | RFC 791 头部解析，零拷贝 `ByteBuffer` 切片，IHL / Total Length / Protocol / 分片标志 |
+| **IPv6** | `Stack/IPHeader.swift` | RFC 8200 头部解析，Payload Length / Next Header / Hop Limit / Flow Label |
+| **TCP** | `Stack/TCPHeader.swift` | RFC 793 段解析器，SYN / SYN-ACK / RST / FIN-ACK 构建器，Data Offset + Flags + 校验和 |
+| **TCP Checksum** | `Stack/TCPChecksum.swift` | IPv4 伪头部 + IPv6 伪头部 16 位 Internet 补码校验和 |
+| **TUN2Socks** | `Stack/TUN2SocksBridge.swift` | 用户空间 TCP 虚拟握手 (SYN → SYN-ACK)，4元组 NAT 会话表，IP 包 → SOCKS5 桥接 |
+
+### 路由引擎 (Router)
+
+| 组件 | 模块 | 说明 |
+|------|------|------|
+| **Domain Trie** | `Router/TrieNode.swift` | 域名后缀 Trie 树，最长匹配优先，O(labels) 查找，10k 规则 < 10µs/次 |
+| **CIDR Matcher** | `Router/RoutingRule.swift` | IPv4 最长前缀匹配，O(32) 查找，支持 `/0` 到 `/32` |
+| **Keyword Matcher** | `Router/TrieNode.swift` | 域名关键词线性扫描 |
+| **Async DNS** | `Router/AsyncDNSResolver.swift` | UDP (端口 53) + DoH (DNS over HTTPS) 双传输，TTL 缓存，A / AAAA 并发查询 |
+| **Routing Engine** | `Router/RoutingEngine.swift` | Actor 中央决策引擎，优先级：域名后缀 → 关键词 → CIDR → 默认 |
+
+### 出站协议 (Outbound)
+
+| 协议 | 模块 | 加密 / 认证方式 | 说明 |
+|------|------|-----------------|------|
+| **Shadowsocks** | `Outbound/Shadowsocks/` | `aes-128-gcm` / `aes-256-gcm` / `chacha20-poly1305` | CryptoKit 硬件 AEAD，HKDF-SHA1 密钥派生，0x3FFF 分块，Salt + Nonce + Tag |
+| **Trojan** | `Outbound/Trojan/` | TLS 1.3 + SHA-224 | SHA-224 密码哈希 (56 字节 hex)，SOCKS5 地址编码，TLS 加密通道 |
+| **REALITY** | `Outbound/TLS/` | 原始 TLS 1.3 字节修改 | ClientHello 解析/序列化，Auth Key + Padding 扩展注入，SNI 替换，长度重算 |
+| **VLESS-REALITY** | `Outbound/VLESS/` | VLESS v0 + REALITY | UUID 认证 (16 字节)，REALITY 握手，三阶段状态机 (handshake → request → streaming) |
+| **VLESS-WebSocket** | `Outbound/VLESS/` | RFC 6455 Binary Frame | WebSocket 帧编解码，Client→Server XOR 掩码，7/16/64 bit 扩展长度，零拷贝透传 |
+| **VMess v1** | `Outbound/VMess/` | MD5 + AES-128-CFB | UUID + 时间戳动态密钥，加密指令块 (端口/地址/填充)，反重放 |
+| **AnyTLS** | `Outbound/AnyTLS/` | XOR + xorshift32 PRNG | 对称混淆，种子 → 密钥流，原地 XOR 突变，双重 XOR = 还原 |
+| **HTTP CONNECT** | `Outbound/HTTP/` | HTTP/1.1 CONNECT 隧道 | `CONNECT host:port` 请求 + 200 响应解析，可选 TLS 嵌套 (`isTLSEnabled`) |
+| **UDP Association** | `Outbound/UDP/` | Actor 并发会话管理 | 4元组 UDP 会话跟踪，30s 空闲超时自动清理，支持 WireGuard / Hysteria2 |
+
+---
+
+## 依赖
+
+| 库 | 用途 |
+|----|------|
+| [swift-nio](https://github.com/apple/swift-nio) | 异步事件驱动网络框架 (NIOCore + NIOPosix) |
+| [swift-nio-ssl](https://github.com/apple/swift-nio-ssl) | TLS 支持 (Trojan / HTTPS 协议) |
+| `CryptoKit` (系统) | AES-GCM / ChaCha20-Poly1305 AEAD (Shadowsocks)，MD5 (VMess)，SHA-1 HMAC (HKDF) |
+| `CommonCrypto` (系统) | SHA-224 (Trojan)，AES-128-CFB (VMess) |
+| `Network.framework` (系统) | UDP / DoH DNS 传输 (AsyncDNSResolver) |
+| `Security.framework` (系统) | `SecRandomCopyBytes` 安全随机数 |
+
+---
+
+## 编译 & 测试
+
+```bash
+# 编译
+swift build
+
+# 运行全部 143 个测试
+swift test
+```
+
+### 平台要求
+
+| 平台 | 最低版本 |
+|------|----------|
+| iOS | 15.0 |
+| macOS | 12.0 |
+| tvOS | 15.0 |
+| visionOS | 1.0 |
+
+### 测试覆盖
+
+```
+143 tests | 27 suites | 0 warnings
+
+入站:
+  SOCKS5:               1 test
+  HTTP Inbound:        13 tests
+
+协议栈:
+  IP Parser:           12 tests
+  TUN2Socks:            4 tests
+
+路由:
+  Router:              13 tests (含 10k 规则 Trie + CIDR 性能基准)
+
+出站:
+  Shadowsocks:         10 tests
+  Trojan:              10 tests
+  REALITY TLS:          8 tests
+  VLESS-REALITY:       13 tests
+  VLESS-WebSocket:      8 tests
+  VMess v1:            16 tests
+  AnyTLS:               8 tests
+  HTTP Outbound:        9 tests
+  UDP Association:      9 tests
+
+集成:
+  Ecosystem Pipeline:   1 test
+  Legacy:               3 tests
+  Omni Protocol:        5 tests (HTTP + UDP 联动)
+```

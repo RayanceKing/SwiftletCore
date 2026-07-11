@@ -100,6 +100,50 @@ public enum TLSParseError: Error, Sendable, Equatable {
 /// A namespace for raw TLS Client Hello parsing and modification operations.
 public enum RealityTLSModifier {
 
+    // MARK: - Builder
+
+    /// Creates a minimal but valid TLS 1.3 Client Hello suitable as the
+    /// base for REALITY modifications.
+    ///
+    /// The returned structure includes:
+    /// • ClientVersion = TLS 1.2 (0x0303, for compatibility)
+    /// • SNI extension pointing to the provided hostname
+    /// • Supported Versions extension (TLS 1.3 = 0x0304)
+    /// • Minimal Key Share (x25519 placeholder)
+    /// • No session ID, single cipher suite (TLS_AES_128_GCM_SHA256),
+    ///   null compression
+    ///
+    /// Callers should then add the REALITY auth‑key extension and padding
+    /// via `addCustomExtension` / `addPadding` before serialising.
+    public static func makeBaseClientHello(sni: String) -> TLSClientHello {
+        // Build the SNI extension data (internal format).
+        var sniExtData = Data()
+        writeUInt16(UInt16(sni.utf8.count + 3), to: &sniExtData)
+        sniExtData.append(0x00) // name_type = host_name
+        writeUInt16(UInt16(sni.utf8.count), to: &sniExtData)
+        sniExtData.append(contentsOf: sni.utf8)
+
+        // Build a minimal Key Share (x25519, 32‑byte placeholder).
+        var ksData = Data()
+        writeUInt16(0x001D, to: &ksData) // named group: x25519
+        writeUInt16(0x0020, to: &ksData) // key length = 32
+        ksData.append(contentsOf: [UInt8](repeating: 0xCC, count: 32))
+
+        return TLSClientHello(
+            clientVersion: 0x0303,
+            random: Data([UInt8](repeating: 0xAA, count: 32)),
+            sessionID: Data(),
+            cipherSuites: [0x1301], // TLS_AES_128_GCM_SHA256
+            compressionMethods: [0x00],
+            extensions: [
+                TLSExtension(type: TLSExtension.Types.serverName, data: sniExtData),
+                TLSExtension(type: TLSExtension.Types.supportedVersions,
+                              data: Data([0x03, 0x04])),
+                TLSExtension(type: TLSExtension.Types.keyShare, data: ksData),
+            ]
+        )
+    }
+
     // MARK: - Parse
 
     /// Parses a complete TLS record containing a Client Hello handshake

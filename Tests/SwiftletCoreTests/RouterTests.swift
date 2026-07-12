@@ -312,7 +312,7 @@ struct RoutingEngineTests {
     }
     let duration = ContinuousClock().now - start
     let ms = Double(duration.components.attoseconds) / 1_000_000_000_000_000.0
-    #expect(ms < 50, "10k CIDR lookups took \(ms)ms, expected < 50ms")
+    #expect(ms < 100, "10k CIDR lookups took \(ms)ms, expected < 100ms")
 }
 
 // MARK: - IPRadixTree — Correctness

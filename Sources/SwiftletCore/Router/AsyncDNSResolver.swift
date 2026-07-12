@@ -43,6 +43,21 @@ public actor AsyncDNSResolver {
     private let upstreamServer: String
     /// Preferred transport.
     private let transport: DNSTransport
+    /// Optional secure racing client for high‑priority encrypted DNS.
+    /// When set, every resolution attempt will race this client's
+    /// upstreams first.  Only if all racing servers fail does the
+    /// resolver fall back to the configured `transport`.
+    public var secureRacingClient: SecureDNSRacingClient?
+    /// If `true` (default), fall back to the legacy transport when
+    /// the secure racing client fails.
+    public var secureRacingFallback: Bool = true
+
+    /// Convenience setter for the racing client and fallback flag.
+    public func setSecureRacingClient(_ client: SecureDNSRacingClient?,
+                                       fallback: Bool = true) {
+        secureRacingClient = client
+        secureRacingFallback = fallback
+    }
 
     public enum DNSTransport: Sendable {
         case udp(port: UInt16 = 53)
@@ -129,6 +144,42 @@ public actor AsyncDNSResolver {
         // 1. Serve from cache if still fresh.
         if let entry = cache[key], !entry.isExpired {
             return entry.records
+        }
+
+        // 2. Try the secure racing client first (fastest of multiple DoH
+        //    / DoQ upstreams).  If it succeeds, cache and return.
+        if let racing = secureRacingClient {
+            do {
+                let result: DNSRecord?
+                switch recordType {
+                case 1:  // A
+                    let raw = try await racing.resolveA(domain: domain)
+                    let addr = IPv4Address(
+                        UInt8((raw >> 24) & 0xFF),
+                        UInt8((raw >> 16) & 0xFF),
+                        UInt8((raw >>  8) & 0xFF),
+                        UInt8(raw & 0xFF)
+                    )
+                    result = .a(addr, ttl: 300)
+                case 28: // AAAA
+                    let addr = try await racing.resolveAAAA(domain: domain)
+                    result = .aaaa(addr, ttl: 300)
+                default:
+                    result = nil
+                }
+                if let record = result {
+                    let records = [record]
+                    cache[key] = CacheEntry(
+                        records: records,
+                        expiresAt: Date().addingTimeInterval(300)
+                    )
+                    return records
+                }
+            } catch {
+                // Racing client failed; fall through to legacy transport
+                // only if fallback is enabled.
+                guard secureRacingFallback else { throw error }
+            }
         }
 
         // 2. Build the DNS query wire‑format message.

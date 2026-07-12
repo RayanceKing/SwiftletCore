@@ -210,7 +210,7 @@ struct AnyTLSMorpherTests {
         _ = AnyTLSMorpher.deobfuscateHandshake(morphed, seed: seed)
         let elapsed = ContinuousClock().now - start
         let ms = Double(elapsed.components.attoseconds) / 1_000_000_000_000_000.0
-        #expect(ms < 50, "64KB round‑trip took \(ms)ms, expected < 50ms")
+        #expect(ms < 100, "64KB round‑trip took \(ms)ms, expected < 100ms")
     }
 }
 

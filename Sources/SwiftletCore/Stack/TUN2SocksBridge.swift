@@ -65,6 +65,47 @@ public final class TUN2SocksBridge: @unchecked Sendable {
     /// TCP window sizes before building reply packets.
     public var outboundBufferedBytes: Int = 0
 
+    /// Whether the outbound proxy channel is currently writable.
+    /// Set to `false` when `channelWritabilityChanged` fires with
+    /// unwritable — the bridge immediately squeezes all active session
+    /// windows to 0 to halt the host OS TCP stack.
+    public var isOutboundWritable: Bool = true
+
+    /// Notifies all active sessions of a channel writability change.
+    /// - When `false`: all session windows are squeezed to 0.
+    /// - When `true`: sessions will recover on their next `adjustWindow` call.
+    public func channelWritabilityChanged(writable: Bool) {
+        isOutboundWritable = writable
+        for session in registry.allSessions {
+            session.channelWritabilityChanged(writable: writable)
+        }
+    }
+
+    /// Scans all sessions and applies backpressure window adjustments
+    /// based on the current `outboundBufferedBytes` and writability state.
+    /// Call this periodically or before building reply packets.
+    public func applyBackpressureToAllSessions() {
+        for session in registry.allSessions {
+            session.adjustWindow(bufferedBytes: outboundBufferedBytes)
+        }
+    }
+
+    /// Evicts stale reassembly data from sessions whose oldest segment
+    /// has exceeded the timeout.  Returns evicted data per session for
+    /// forwarding to the outbound tunnel.
+    public func evictStaleReassemblyData(
+        olderThan timeout: TimeInterval = 0.750
+    ) -> [(session: TCPSessionKey, data: [(seq: UInt32, payload: Data)])] {
+        var results: [(TCPSessionKey, [(UInt32, Data)])] = []
+        for session in registry.allSessions {
+            let evicted = session.evictStaleSegments(olderThan: timeout)
+            if !evicted.isEmpty {
+                results.append((session.key, evicted))
+            }
+        }
+        return results
+    }
+
     // MARK: - Stored Properties
 
     /// The session registry (NAT table).

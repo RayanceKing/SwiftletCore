@@ -59,6 +59,19 @@ public actor RoutingEngine {
     /// The default decision when no rule matches.
     public var defaultDecision: RoutingDecision = .proxy
 
+    // MARK: - Fake IP (optional)
+
+    /// An optional Fake IP pool manager.  When set, IP targets that fall
+    /// within the fake IP pool are instantly reverse‑resolved to their
+    /// original domain, bypassing blocking network DNS round‑trips.
+    public var fakeIPManager: FakeIPPoolManager?
+
+    /// Convenience setter for the fake IP manager (callable from outside
+    /// the actor with `await`).
+    public func setFakeIPManager(_ pool: FakeIPPoolManager?) {
+        self.fakeIPManager = pool
+    }
+
     // MARK: - DNS (optional)
 
     /// An optional DNS resolver.  When set, domain targets that do not match
@@ -163,20 +176,31 @@ public actor RoutingEngine {
         ip: UInt32? = nil,
         context: RoutingContext = .empty
     ) -> RoutingDecision {
+        // Resolve effective domain: if the IP is a fake IP, reverse‑map it
+        // to the original domain so suffix‑trie rules apply transparently.
+        let effectiveDomain: String? = {
+            if let d = domain { return d }
+            if let ip = ip, let fip = fakeIPManager,
+               let resolved = fip.resolveIPv4(ip) {
+                return resolved
+            }
+            return nil
+        }()
+
         // 1. Domain‑suffix trie (longest match).
-        if let domain = domain, let rule = domainTrie.match(domain: domain) {
+        if let d = effectiveDomain, let rule = domainTrie.match(domain: d) {
             return rule.decision
         }
 
         // 2. Domain‑keyword scan.
-        if let domain = domain, let rule = keywordMatcher.match(domain: domain) {
+        if let d = effectiveDomain, let rule = keywordMatcher.match(domain: d) {
             return rule.decision
         }
 
         // 3. General‑purpose rules (userAgent, ASN, logical).
         for rule in generalRules {
             if rule.evaluate(
-                domain: domain, ip: ip, context: context,
+                domain: effectiveDomain, ip: ip, context: context,
                 domainTrie: domainTrie
             ) {
                 return rule.decision

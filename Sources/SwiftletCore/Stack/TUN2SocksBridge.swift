@@ -45,14 +45,25 @@ public final class TUN2SocksBridge: @unchecked Sendable {
     /// The result of processing an inbound IP packet.
     public enum ProcessResult: Sendable {
         /// A raw IP packet that should be written back to the TUN interface
-        /// (e.g. a SYN‑ACK, RST).
+        /// (e.g. a SYN‑ACK, RST, ICMP unreachable).
         case reply(Data)
         /// Data that should be forwarded to the SOCKS5 outbound for the
         /// identified session (future milestone).
         case forwardToSocks5(session: TCPSessionKey, payload: Data)
+        /// Inject an ICMP Destination Unreachable packet (routing block /
+        /// connection failure — tells the client app to error immediately).
+        case icmpUnreachable(Data)
         /// The packet was handled internally and requires no external action.
         case none
     }
+
+    // MARK: - Backpressure State
+
+    /// Estimated number of bytes buffered in the outbound proxy channel.
+    /// Updated by external callers (e.g. the outbound handler's channel
+    /// writability listener).  The bridge uses this to dynamically scale
+    /// TCP window sizes before building reply packets.
+    public var outboundBufferedBytes: Int = 0
 
     // MARK: - Stored Properties
 
@@ -403,12 +414,15 @@ public final class TUN2SocksBridge: @unchecked Sendable {
 
     /// Builds a generic 20‑byte TCP header with the given parameters.
     /// The checksum field is set to zero (caller must compute and fill it).
+    /// When `session` is provided, its `advertisedWindow` is used for
+    /// backpressure‑aware flow control.
     private func buildTCPHeaderBytes(
         srcPort: UInt16,
         dstPort: UInt16,
         seq: UInt32,
         ack: UInt32,
-        flags: TCPFlags
+        flags: TCPFlags,
+        session: TCPSession? = nil
     ) -> [UInt8] {
         var bytes = [UInt8](repeating: 0, count: 20)
 
@@ -426,10 +440,82 @@ public final class TUN2SocksBridge: @unchecked Sendable {
         bytes[11] = UInt8(truncatingIfNeeded: ack)
         bytes[12] = 0x50  // Data Offset = 5
         bytes[13] = flags.rawValue
-        bytes[14] = 0xFF; bytes[15] = 0xFF  // window = 65535
+        // Dynamic window size — scaled by backpressure.
+        let window = session?.advertisedWindow ?? 65535
+        bytes[14] = UInt8(truncatingIfNeeded: window >> 8)
+        bytes[15] = UInt8(truncatingIfNeeded: window)
         bytes[16] = 0x00; bytes[17] = 0x00  // checksum placeholder
         bytes[18] = 0x00; bytes[19] = 0x00  // urgent pointer
 
         return bytes
+    }
+
+    // MARK: - ICMP Unreachable Injection
+
+    /// Builds a raw IPv4 packet containing an ICMP Destination Unreachable
+    /// message (Type 3, Code 1: Host Unreachable), embedding the original
+    /// packet's IP header + 8 bytes of transport header as required by
+    /// RFC 792.
+    ///
+    /// This tells the client application (e.g. Safari) to error immediately
+    /// instead of hanging on a silent timeout.
+    public static func buildICMPUnreachable(
+        for originalPacket: Data,
+        code: UInt8 = 1,
+        srcIP: IPv4Address = IPv4Address(198, 18, 0, 1)
+    ) -> Data {
+        let ipHeaderLen = Int((originalPacket[0] & 0x0F)) * 4
+        let includeLen = min(ipHeaderLen + 8, originalPacket.count)
+        let originalSlice = originalPacket.prefix(includeLen)
+
+        let icmpHeaderSize = 8
+        let icmpPayloadSize = originalSlice.count
+        let icmpTotalLen = icmpHeaderSize + icmpPayloadSize
+        let ipTotalLen = 20 + icmpTotalLen
+
+        var pkt = [UInt8](repeating: 0, count: ipTotalLen)
+
+        // IPv4 header.
+        pkt[0] = 0x45; pkt[1] = 0x00
+        pkt[2] = UInt8(ipTotalLen >> 8); pkt[3] = UInt8(ipTotalLen & 0xFF)
+        pkt[4...7] = [0x00, 0x00, 0x00, 0x00]
+        pkt[8] = 0x40; pkt[9] = 1  // Protocol=ICMP
+        pkt[10...11] = [0x00, 0x00]
+        pkt[12...15] = [srcIP.octet0, srcIP.octet1, srcIP.octet2, srcIP.octet3]
+        pkt[16] = originalPacket[12]; pkt[17] = originalPacket[13]
+        pkt[18] = originalPacket[14]; pkt[19] = originalPacket[15]
+
+        // ICMP header: Type=3, Code=code, Checksum placeholder, Unused=0.
+        pkt[20] = 3; pkt[21] = code
+        pkt[22...23] = [0x00, 0x00]
+        pkt[24...27] = [0x00, 0x00, 0x00, 0x00]
+
+        // ICMP payload = original IP header + 8 bytes.
+        for (i, b) in originalSlice.enumerated() {
+            pkt[20 + icmpHeaderSize + i] = b
+        }
+
+        // ICMP checksum.
+        let icmpSegment = Array(pkt[20...])
+        let cksum = Self.icmpChecksum(icmpSegment)
+        pkt[22] = UInt8(cksum >> 8); pkt[23] = UInt8(cksum & 0xFF)
+
+        return Data(pkt)
+    }
+
+    private static func icmpChecksum(_ data: [UInt8]) -> UInt16 {
+        var sum: UInt32 = 0; var i = 0
+        while i + 1 < data.count {
+            sum &+= (UInt32(data[i]) << 8) | UInt32(data[i + 1]); i += 2
+        }
+        if i < data.count { sum &+= UInt32(data[i]) << 8 }
+        while (sum >> 16) != 0 { sum = (sum & 0xFFFF) + (sum >> 16) }
+        return ~UInt16(truncatingIfNeeded: sum)
+    }
+
+    /// Convenience: builds an ICMP Host Unreachable for a routing `.block`
+    /// or connection failure.
+    public func buildBlockRejection(for originalPacket: Data) -> Data {
+        Self.buildICMPUnreachable(for: originalPacket, code: 1)
     }
 }

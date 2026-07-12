@@ -6,10 +6,12 @@
 //  Maintains the virtual TCP connection state for every 4‑tuple
 //  (source IP, source port, destination IP, destination port) that passes
 //  through the TUN2Socks bridge.  Each session tracks the client and server
-//  initial sequence numbers, the connection state, and the outbound SOCKS5
-//  channel once the handshake completes.
+//  initial sequence numbers, the connection state, dynamic backpressure
+//  window sizing, and an out‑of‑order segment reassembly queue.
 //
 //===----------------------------------------------------------------------===//
+
+import Foundation
 
 // MARK: - Session Key (4‑Tuple)
 
@@ -124,15 +126,97 @@ public final class TCPSession {
     /// data back to the client.  Advances as outbound segments are produced.
     public var serverNextSeq: UInt32
 
-    // MARK: SOCKS5 Outbound
+    // MARK: Dynamic Window Sizing (Backpressure)
 
-    /// The SOCKS5 upstream channel, set once the TCP handshake completes and
-    /// the bridge initiates a CONNECT to the destination.
+    /// Current advertised receive window size sent to the client.
+    /// Dynamically scaled based on outbound channel buffer pressure:
+    /// - Default: 65535 (max)
+    /// - Under pressure: scales down to as low as 2048
+    /// This forces the host OS TCP stack to throttle transmission,
+    /// keeping memory within the 5 MB–8 MB iOS NE limit.
+    public var advertisedWindow: UInt16 = 65535
+
+    /// Minimum window size when under maximum backpressure.
+    public static let minWindow: UInt16 = 2048
+
+    /// Maximum window size (no backpressure).
+    public static let maxWindow: UInt16 = 65535
+
+    /// Adjusts the advertised window based on the outbound channel's
+    /// buffered byte count.  Called before each reply packet is built.
     ///
-    /// Before this is set, payload data is buffered (or, in the minimal
-    /// implementation, data received before the SOCKS5 pipe is ready is
-    /// silently dropped — production implementations would buffer it).
-//    public var socksChannel: Channel?  // Future: SOCKS5 integration
+    /// - Parameter bufferedBytes: Number of bytes waiting in the outbound
+    ///   channel's write buffer (0 = no pressure, >64KB = max pressure).
+    public func adjustWindow(bufferedBytes: Int) {
+        switch bufferedBytes {
+        case 0 ..< 8192:
+            advertisedWindow = Self.maxWindow
+        case 8192 ..< 32768:
+            advertisedWindow = 32768
+        case 32768 ..< 65536:
+            advertisedWindow = 8192
+        default:
+            advertisedWindow = Self.minWindow
+        }
+    }
+
+    // MARK: TCP Reassembly Queue
+
+    /// Maximum number of out‑of‑order segments to buffer before dropping.
+    private static let maxReassemblySlots = 64
+
+    /// Buffered out‑of‑order segments, keyed by their TCP sequence number.
+    private var reassemblyBuffer: [UInt32: Data] = [:]
+
+    /// Inserts an out‑of‑order segment into the reassembly buffer.
+    ///
+    /// - Parameters:
+    ///   - seq: The TCP sequence number of this segment.
+    ///   - data: The segment payload.
+    /// - Returns: `true` if the segment was buffered, `false` if the
+    ///   buffer is full and the segment was dropped.
+    @discardableResult
+    public func bufferOutOfOrder(seq: UInt32, data: Data) -> Bool {
+        guard reassemblyBuffer.count < Self.maxReassemblySlots else {
+            return false
+        }
+        reassemblyBuffer[seq] = data
+        return true
+    }
+
+    /// Extracts all contiguous reassembled data starting from
+    /// `clientNextSeq`.  Returns the merged payload and advances
+    /// `clientNextSeq`.
+    ///
+    /// - Returns: The contiguous reassembled data, or `nil` if the
+    ///   next expected segment is not yet buffered.
+    public func extractContiguous() -> Data? {
+        guard let nextChunk = reassemblyBuffer[clientNextSeq] else {
+            return nil
+        }
+        reassemblyBuffer.removeValue(forKey: clientNextSeq)
+
+        var merged = Data()
+        merged.append(nextChunk)
+        advanceClientSeq(by: nextChunk.count)
+
+        // Chain subsequent contiguous segments.
+        while let chunk = reassemblyBuffer[clientNextSeq] {
+            reassemblyBuffer.removeValue(forKey: clientNextSeq)
+            merged.append(chunk)
+            advanceClientSeq(by: chunk.count)
+        }
+
+        return merged
+    }
+
+    /// Number of out‑of‑order segments currently buffered.
+    public var reassemblySlotsUsed: Int { reassemblyBuffer.count }
+
+    /// Drops all buffered reassembly segments.
+    public func flushReassemblyBuffer() {
+        reassemblyBuffer.removeAll()
+    }
 
     // MARK: Initialisation
 

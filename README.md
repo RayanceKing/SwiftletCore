@@ -119,7 +119,7 @@
 # 编译
 swift build
 
-# 运行全部 599 个测试
+# 运行全部 623 个测试
 swift test
 ```
 
@@ -135,7 +135,7 @@ swift test
 ### 测试覆盖
 
 ```
-571 tests | 122 suites | 0 warnings
+623 tests | 134 suites | 0 warnings
 
 入站:
   SOCKS5:               1 test

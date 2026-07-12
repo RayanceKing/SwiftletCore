@@ -117,14 +117,12 @@ extension RoutingRule {
     ///   - ip: Optional `UInt32` IPv4 address (host byte order).
     ///   - context: Additional context (User‑Agent, ASN, etc.).
     ///   - domainTrie: Domain suffix trie for domain‑based sub‑rules.
-    ///   - cidrMatcher: CIDR matcher for IP‑based sub‑rules.
     /// - Returns: `true` if the rule matches.
     public func evaluate(
         domain: String? = nil,
         ip: UInt32? = nil,
         context: RoutingContext = .empty,
-        domainTrie: DomainTrie? = nil,
-        cidrMatcher: CIDRMatcher? = nil
+        domainTrie: DomainTrie? = nil
     ) -> Bool {
         switch self {
         case .domainSuffix(let suffix, decision: _):
@@ -152,14 +150,14 @@ extension RoutingRule {
             return rules.allSatisfy {
                 $0.evaluate(
                     domain: domain, ip: ip, context: context,
-                    domainTrie: domainTrie, cidrMatcher: cidrMatcher
+                    domainTrie: domainTrie
                 )
             }
 
         case .logicalNot(let rule, decision: _):
             return !rule.evaluate(
                 domain: domain, ip: ip, context: context,
-                domainTrie: domainTrie, cidrMatcher: cidrMatcher
+                domainTrie: domainTrie
             )
         }
     }

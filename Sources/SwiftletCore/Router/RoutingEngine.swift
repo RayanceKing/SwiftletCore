@@ -3,18 +3,28 @@
 //  RoutingEngine.swift
 //  SwiftletCore — Central Routing Decision Engine
 //
-//  The "brain" of the proxy: it evaluates domain and IP targets against the
-//  domain‑suffix trie, keyword matcher, and CIDR tables, then returns a
-//  final `RoutingDecision`.  When DNS resolution is required (e.g. a domain
-//  needs to be resolved to an IP before CIDR rules can be evaluated), the
-//  engine delegates to the `AsyncDNSResolver`.
+//  The "brain" of the proxy: it evaluates domain and IP targets against
+//  the domain‑suffix trie, keyword matcher, bitwise IP radix trees, and
+//  multi‑dimension context rules, then returns a final `RoutingDecision`.
+//  When DNS resolution is required, the engine delegates to the
+//  `AsyncDNSResolver` for anti‑DNS‑leak CIDR enforcement.
 //
 //  Rule priority (first match wins)
 //  --------------------------------
-//  1. Domain‑suffix trie  (longest suffix match)
+//  1. Domain‑suffix trie       (longest suffix match)
 //  2. Domain‑keyword scan
-//  3. IP‑CIDR table       (longest prefix match)
-//  4. Default rule        (`.proxy`)
+//  3. General rules             (userAgent → ASN → logical combinations)
+//  4. IPv4 Radix Tree           (O(32) bitwise longest‑prefix match)
+//  5. IPv6 Radix Tree           (O(128) bitwise longest‑prefix match)
+//  6. Default rule
+//
+//  IP Lookup — Radix Tree vs Legacy CIDRMatcher
+//  --------------------------------------------
+//  The engine now uses `IPRadixTree` / `IPv6RadixTree` (bitwise binary
+//  tries) instead of the array‑of‑33‑dictionaries `CIDRMatcher`.  This
+//  guarantees exactly 32 bit‑tests per IPv4 lookup and 128 per IPv6
+//  lookup regardless of how many rules are stored — a substantial win
+//  for rule sets exceeding ~10 000 CIDR entries.
 //
 //===----------------------------------------------------------------------===//
 
@@ -25,7 +35,7 @@ import Foundation
 /// The central routing engine that evaluates targets and returns decisions.
 ///
 /// Rules are loaded via `add(rule:)` or the convenience bulk‑load methods.
-/// Lookups are synchronous for the trie/CIDR paths; DNS resolution is
+/// Lookups are synchronous for the trie/radix paths; DNS resolution is
 /// asynchronous and cachable.
 ///
 /// This type is an `actor` so that rule updates and DNS cache access are
@@ -40,8 +50,11 @@ public actor RoutingEngine {
     /// Keyword matcher (secondary; typically few rules).
     public let keywordMatcher: KeywordMatcher
 
-    /// IPv4 CIDR matcher.
-    public let cidrMatcher: CIDRMatcher
+    /// Bitwise radix tree for IPv4 CIDR rules — O(32) lookup.
+    public let ipv4RadixTree: IPRadixTree
+
+    /// Bitwise radix tree for IPv6 CIDR rules — O(128) lookup.
+    public let ipv6RadixTree: IPv6RadixTree
 
     /// The default decision when no rule matches.
     public var defaultDecision: RoutingDecision = .proxy
@@ -53,12 +66,19 @@ public actor RoutingEngine {
     /// rules (anti‑DNS‑leak).
     public var dnsResolver: AsyncDNSResolver?
 
+    // MARK: - General‑Purpose Rule Store
+
+    /// Rules that require context beyond domain/IP (userAgent, ASN,
+    /// logical combinations).
+    private var generalRules: [RoutingRule] = []
+
     // MARK: - Initialisation
 
     public init() {
-        self.domainTrie = DomainTrie()
+        self.domainTrie     = DomainTrie()
         self.keywordMatcher = KeywordMatcher()
-        self.cidrMatcher = CIDRMatcher()
+        self.ipv4RadixTree  = IPRadixTree()
+        self.ipv6RadixTree  = IPv6RadixTree()
     }
 
     // MARK: - Rule Management
@@ -73,28 +93,19 @@ public actor RoutingEngine {
         case .domainKeyword(let keyword, decision: _):
             keywordMatcher.insert(keyword: keyword, rule: rule)
 
-        case .ipv4CIDR(network: let network, prefixLength: let prefixLength, decision: _):
-            cidrMatcher.insert(network: network, prefixLength: prefixLength, rule: rule)
+        case .ipv4CIDR(let network, let prefixLength, decision: _):
+            ipv4RadixTree.insert(
+                network: network,
+                prefixLength: prefixLength,
+                rule: rule
+            )
 
         case .userAgent, .ipAsn, .logicalAnd, .logicalNot:
-            // These rules are stored in the general‑purpose rule list
-            // and evaluated via `evaluate(context:)`.
             generalRules.append(rule)
         }
     }
 
-    // MARK: - General‑Purpose Rule Store
-
-    /// Rules that require context beyond domain/IP (userAgent, ASN,
-    /// logical combinations).
-    private var generalRules: [RoutingRule] = []
-
     /// Bulk‑loads multiple domain‑suffix rules for the same decision.
-    ///
-    /// - Parameters:
-    ///   - suffixes: Domain suffixes (e.g. `["apple.com", "google.com"]`).
-    ///   - decision: The decision to assign (default `.proxy` if the rule
-    ///     type doesn't carry its own decision).
     public func addDomainSuffixRules(
         _ suffixes: [String],
         decision: RoutingDecision = .proxy
@@ -105,41 +116,46 @@ public actor RoutingEngine {
         }
     }
 
-    /// Bulk‑loads CIDR rules.
-    public func addCIDRRules(_ cidrs: [String], decision: RoutingDecision = .direct) {
+    /// Bulk‑loads CIDR rules into the IPv4 radix tree.
+    public func addCIDRRules(
+        _ cidrs: [String],
+        decision: RoutingDecision = .direct
+    ) {
         for cidrString in cidrs {
-            guard let (network, prefixLen) = try? CIDRParser.parseIPv4(cidrString) else {
-                continue
-            }
-            let rule = RoutingRule.ipv4CIDR(network: network, prefixLength: prefixLen, decision: decision)
-            cidrMatcher.insert(network: network, prefixLength: prefixLen, rule: rule)
+            guard let (network, prefixLen) = try? CIDRParser.parseIPv4(cidrString)
+            else { continue }
+            let rule = RoutingRule.ipv4CIDR(
+                network: network, prefixLength: prefixLen, decision: decision
+            )
+            ipv4RadixTree.insert(
+                network: network, prefixLength: prefixLen, rule: rule
+            )
         }
     }
 
     /// Removes all rules.
     public func reset() {
         domainTrie.removeAll()
-        cidrMatcher.removeAll()
+        ipv4RadixTree.removeAll()
+        ipv6RadixTree.removeAll()
         keywordMatcher.removeAll()
         generalRules.removeAll()
     }
 
-    // MARK: - Contextual Routing
+    // MARK: - Contextual Routing (primary entry point)
 
     /// Evaluates a target with full multi‑dimensional context.
     ///
     /// Rule priority (first match wins):
     /// 1. Domain‑suffix trie
     /// 2. Domain‑keyword scan
-    /// 3. User‑Agent rules (from generalRules)
-    /// 4. ASN rules (from generalRules)
-    /// 5. Logical combination rules (from generalRules)
-    /// 6. IP‑CIDR table
-    /// 7. Default decision
+    /// 3. General rules (userAgent → ASN → logical combinations)
+    /// 4. IPv4 Radix Tree  (O(32) bitwise longest‑prefix)
+    /// 5. Default decision
     ///
     /// - Parameters:
     ///   - domain: Optional domain target.
-    ///   - ip: Optional IPv4 address (host byte order).
+    ///   - ip: Optional IPv4 address (host byte order UInt32).
     ///   - context: Additional context (User‑Agent, ASN).
     /// - Returns: The routing decision.
     public func route(
@@ -147,7 +163,7 @@ public actor RoutingEngine {
         ip: UInt32? = nil,
         context: RoutingContext = .empty
     ) -> RoutingDecision {
-        // 1. Domain‑suffix trie.
+        // 1. Domain‑suffix trie (longest match).
         if let domain = domain, let rule = domainTrie.match(domain: domain) {
             return rule.decision
         }
@@ -161,14 +177,14 @@ public actor RoutingEngine {
         for rule in generalRules {
             if rule.evaluate(
                 domain: domain, ip: ip, context: context,
-                domainTrie: domainTrie, cidrMatcher: cidrMatcher
+                domainTrie: domainTrie
             ) {
                 return rule.decision
             }
         }
 
-        // 4. IP‑CIDR.
-        if let ip = ip, let rule = cidrMatcher.match(ip: ip) {
+        // 4. IPv4 Radix Tree (O(32) bitwise longest‑prefix match).
+        if let ip = ip, let rule = ipv4RadixTree.match(ip: ip) {
             return rule.decision
         }
 
@@ -197,20 +213,17 @@ public actor RoutingEngine {
         return defaultDecision
     }
 
-    /// Evaluates a domain target, resolving it via DNS first if a resolver is
-    /// configured (enables CIDR matching for domains).
+    /// Evaluates a domain target, resolving it via DNS first if a resolver
+    /// is configured (enables CIDR matching for domains — anti‑leak).
     ///
     /// - Parameter domain: The fully‑qualified domain name.
     /// - Returns: The routing decision.
     public func routeWithDNS(domain: String) async -> RoutingDecision {
-        // First try domain rules.
         let domainDecision = route(domain: domain)
         if domainDecision != defaultDecision {
             return domainDecision
         }
 
-        // If domain rules didn't match and we have a DNS resolver, try to
-        // resolve the domain and match against CIDR rules (anti‑leak).
         if let resolver = dnsResolver, let ip = try? await resolver.resolveA(domain) {
             return route(ip: ip)
         }
@@ -220,7 +233,7 @@ public actor RoutingEngine {
 
     // MARK: - IP Routing
 
-    /// Evaluates an IPv4 address against CIDR rules.
+    /// Evaluates an IPv4 address against the radix tree.
     ///
     /// - Parameter ip: The IPv4 address.
     /// - Returns: The routing decision.
@@ -230,7 +243,22 @@ public actor RoutingEngine {
                        | (UInt32(ip.octet2) <<  8)
                        |  UInt32(ip.octet3)
 
-        if let rule = cidrMatcher.match(ip: addrUInt32) {
+        if let rule = ipv4RadixTree.match(ip: addrUInt32) {
+            return rule.decision
+        }
+        return defaultDecision
+    }
+
+    // MARK: - IPv6 Routing
+
+    /// Evaluates an IPv6 address against the IPv6 radix tree.
+    ///
+    /// - Parameters:
+    ///   - upper: Upper 64 bits of the address.
+    ///   - lower: Lower 64 bits of the address.
+    /// - Returns: The routing decision.
+    public func routeIPv6(upper: UInt64, lower: UInt64) -> RoutingDecision {
+        if let rule = ipv6RadixTree.match(upper: upper, lower: lower) {
             return rule.decision
         }
         return defaultDecision
@@ -241,13 +269,15 @@ public actor RoutingEngine {
     /// Total number of domain‑suffix rules.
     public var domainRuleCount: Int { domainTrie.ruleCount }
 
-    /// Total number of CIDR rules.
-    public var cidrRuleCount: Int { cidrMatcher.count }
+    /// Total number of CIDR rules (IPv4 + IPv6 radix trees).
+    public var cidrRuleCount: Int {
+        ipv4RadixTree.count + ipv6RadixTree.count
+    }
 
     /// Total number of keyword rules.
     public var keywordRuleCount: Int { keywordMatcher.count }
 
-    /// Total general‑purpose rules.
+    /// Total general‑purpose rules (userAgent, ASN, logical).
     public var generalRuleCount: Int { generalRules.count }
 
     /// Total rules across all matchers.

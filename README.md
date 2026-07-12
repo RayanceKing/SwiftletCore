@@ -30,7 +30,10 @@
 │  Trojan/        ← Trojan-TLS 出站协议                         │
 │  TLS/           ← REALITY TLS ClientHello 修改器              │
 │  VLESS/         ← VLESS-REALITY + WebSocket 出站引擎          │
+│  WireGuard/     ← Noise_IKpsk2 握手 + Type 4 Transport AEAD   │
 │  VMess/         ← VMess v1 协议 (MD5 + AES-128-CFB)          │
+│  Hysteria2/     ← QUIC 帧 + Salamander 混淆引擎               │
+│  TUIC/           ← TUIC v5 二进制帧 + 流多路分解器              │
 │  AnyTLS/        ← 对称字节混淆引擎 (XOR + xorshift32)         │
 │  HTTP/          ← HTTP CONNECT 出站隧道                       │
 │  UDP/           ← UDP 会话关联管理器 (WireGuard / Hysteria2)   │
@@ -78,6 +81,9 @@
 | **VLESS-REALITY** | `Outbound/VLESS/` | VLESS v0 + REALITY | UUID 认证 (16 字节)，REALITY 握手，三阶段状态机 (handshake → request → streaming) |
 | **VLESS-WebSocket** | `Outbound/VLESS/` | RFC 6455 Binary Frame | WebSocket 帧编解码，Client→Server XOR 掩码，7/16/64 bit 扩展长度，零拷贝透传 |
 | **VMess v1** | `Outbound/VMess/` | MD5 + AES-128-CFB | UUID + 时间戳动态密钥，加密指令块 (端口/地址/填充)，反重放 |
+| **WireGuard** | `Outbound/WireGuard/` | Curve25519 ECDH + HKDF-SHA256 + ChaCha20-Poly1305 | Noise_IKpsk2_25519 握手 (Type 1/2)，Type 4 Transport Data 加密/解密，零拷贝 ByteBuffer 封装 |
+| **Hysteria 2** | `Outbound/Hysteria2/` | QUIC Varints + 自定义帧 + Salamander XOR 混淆 | Type 0x401 TCP/0x402 UDP 请求帧，0x403 数据帧，Salamander 动态填充防 DPI |
+| **TUIC v5** | `Outbound/TUIC/` | 原始 QUIC 流二进制帧 | Type 0x00 Auth / 0x01 Connect / 0x02 Packet / 0x03 Disconnect / 0x04 Heartbeat，零拷贝 ByteBuffer 编解码，边界安全 nil‑on‑partial 流解码器 |
 | **AnyTLS** | `Outbound/AnyTLS/` | XOR + xorshift32 PRNG | 对称混淆，种子 → 密钥流，原地 XOR 突变，双重 XOR = 还原 |
 | **HTTP CONNECT** | `Outbound/HTTP/` | HTTP/1.1 CONNECT 隧道 | `CONNECT host:port` 请求 + 200 响应解析，可选 TLS 嵌套 (`isTLSEnabled`) |
 | **UDP Association** | `Outbound/UDP/` | Actor 并发会话管理 | 4元组 UDP 会话跟踪，30s 空闲超时自动清理，支持 WireGuard / Hysteria2 |
@@ -90,7 +96,7 @@
 |----|------|
 | [swift-nio](https://github.com/apple/swift-nio) | 异步事件驱动网络框架 (NIOCore + NIOPosix) |
 | [swift-nio-ssl](https://github.com/apple/swift-nio-ssl) | TLS 支持 (Trojan / HTTPS 协议) |
-| `CryptoKit` (系统) | AES-GCM / ChaCha20-Poly1305 AEAD (Shadowsocks)，MD5 (VMess)，SHA-1 HMAC (HKDF) |
+| `CryptoKit` (系统) | AEAD (Shadowsocks / WireGuard)，Curve25519 ECDH + HKDF-SHA256 (WireGuard Noise)，MD5 (VMess)，SHA-1 HMAC (HKDF) |
 | `CommonCrypto` (系统) | SHA-224 (Trojan)，AES-128-CFB (VMess) |
 | `Network.framework` (系统) | UDP / DoH DNS 传输 (AsyncDNSResolver) |
 | `Security.framework` (系统) | `SecRandomCopyBytes` 安全随机数 |
@@ -103,7 +109,7 @@
 # 编译
 swift build
 
-# 运行全部 143 个测试
+# 运行全部 359 个测试
 swift test
 ```
 
@@ -119,7 +125,7 @@ swift test
 ### 测试覆盖
 
 ```
-143 tests | 27 suites | 0 warnings
+359 tests | 73 suites | 0 warnings
 
 入站:
   SOCKS5:               1 test
@@ -139,6 +145,9 @@ swift test
   VLESS-REALITY:       13 tests
   VLESS-WebSocket:      8 tests
   VMess v1:            16 tests
+  WireGuard:           61 tests (Noise 21 + Transport Data 40)
+  Hysteria 2:          38 tests (帧/QUIC/Salamander/UDP)
+  TUIC v5:             84 tests (帧枚举/编码器/解码器/部分读取/往返)
   AnyTLS:               8 tests
   HTTP Outbound:        9 tests
   UDP Association:      9 tests

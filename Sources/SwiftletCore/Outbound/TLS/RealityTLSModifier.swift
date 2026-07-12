@@ -43,6 +43,12 @@ public struct TLSRecord: Sendable {
 
     /// The minimum valid record (header = 5 bytes).
     public static let headerSize = 5
+
+    /// Well‑known TLS ContentType values (RFC 8446 Appendix A).
+    public static let contentTypeHandshake        : UInt8 = 0x16
+    public static let contentTypeChangeCipherSpec : UInt8 = 0x14
+    public static let contentTypeApplicationData  : UInt8 = 0x17
+    public static let contentTypeAlert            : UInt8 = 0x15
 }
 
 // MARK: - TLS Handshake

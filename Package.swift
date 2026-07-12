@@ -35,7 +35,10 @@ let package = Package(
         ),
         .testTarget(
             name: "SwiftletCoreTests",
-            dependencies: ["SwiftletCore"],
+            dependencies: [
+                "SwiftletCore",
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+            ],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],

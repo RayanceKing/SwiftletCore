@@ -173,4 +173,82 @@ public enum OutboundProtocol: Sendable, Equatable {
             return true
         }
     }
+
+    // MARK: - Connection Pool Integration
+
+    /// Creates a connection to the target proxy server, first consulting
+    /// the global `OutboundConnectionPool` for an idle cached channel.
+    ///
+    /// If a pooled channel is found with a matching protocol fingerprint,
+    /// it is reused immediately — bypassing TCP connect, TLS handshake,
+    /// and cryptographic key exchange (Shadowsocks AEAD, Noise, REALITY).
+    ///
+    /// If no pooled channel is available, a fresh `ClientBootstrap`
+    /// connection is established and instrumented with a
+    /// `ProxyChannelPoolBridgeHandler` so it can be recycled after the
+    /// session completes.
+    ///
+    /// - Parameters:
+    ///   - group: The event‑loop group for fresh connections.
+    ///   - host: Destination proxy host.
+    ///   - port: Destination proxy port.
+    ///   - configuration: The parsed node configuration for fingerprint
+    ///     derivation and pool key matching.
+    ///   - channelInitializer: A closure that installs protocol‑specific
+    ///     handlers (Shadowsocks, VMess, Trojan, etc.) above the pool
+    ///     bridge handler.
+    /// - Returns: An `EventLoopFuture<Channel>` resolving to the active,
+    ///   instrumented outbound channel.
+    public func connectPooled(
+        using group: EventLoopGroup,
+        to host: String,
+        port: Int,
+        configuration: ProxyNodeConfiguration,
+        channelInitializer: @escaping @Sendable (Channel) -> EventLoopFuture<Void>
+    ) async throws -> Channel {
+        let loop = group.next()
+
+        // ---- Hot path: try the pool first -------------------------------
+        if let pooled = await OutboundConnectionPool.shared.acquireChannel(
+            for: configuration, on: loop
+        ) {
+            // Locate the bridge handler and mark it as leased.
+            if let bridge = try? await pooled.pipeline.handler(
+                type: ProxyChannelPoolBridgeHandler.self
+            ).get() {
+                bridge.markLeased()
+            }
+            // Re‑apply the session‑specific initialiser (adds handlers
+           //  above the bridge that were stripped on the previous detach).
+            try await channelInitializer(pooled).get()
+            return pooled
+        }
+
+        // ---- Cold path: establish a fresh connection ---------------------
+        let poolKey = PoolKey(from: configuration)
+        let bridgeHandler = ProxyChannelPoolBridgeHandler(
+            poolKey: poolKey,
+            node: configuration
+        )
+
+        let bootstrap = ClientBootstrap(group: group)
+            .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .channelOption(ChannelOptions.autoRead, value: false)
+            .channelInitializer { channel in
+                // Install the pool bridge at the bottom of the pipeline.
+                channel.pipeline.addHandler(
+                    bridgeHandler,
+                    name: "poolBridge"
+                ).flatMap {
+                    // Let the caller install protocol handlers above.
+                    channelInitializer(channel)
+                }.flatMap {
+                    // Mark as leased once the pipeline is fully assembled.
+                    bridgeHandler.markLeased()
+                    return channel.eventLoop.makeSucceededVoidFuture()
+                }
+            }
+
+        return try await bootstrap.connect(host: host, port: port).get()
+    }
 }

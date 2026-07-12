@@ -314,3 +314,338 @@ struct RoutingEngineTests {
     let ms = Double(duration.components.attoseconds) / 1_000_000_000_000_000.0
     #expect(ms < 50, "10k CIDR lookups took \(ms)ms, expected < 50ms")
 }
+
+// MARK: - IPRadixTree — Correctness
+
+@Suite("IPRadixTree — Correctness")
+struct IPRadixTreeCorrectnessTests {
+
+    @Test func basicInsertAndMatch() {
+        let tree = IPRadixTree()
+        // 192.168.0.0/16
+        let network: UInt32 = (192 << 24) | (168 << 16)
+        let rule = RoutingRule.ipv4CIDR(
+            network: network, prefixLength: 16, decision: .direct
+        )
+        tree.insert(network: network, prefixLength: 16, rule: rule)
+
+        // 192.168.1.1 should match.
+        let ip: UInt32 = (192 << 24) | (168 << 16) | (1 << 8) | 1
+        let match = tree.match(ip: ip)
+        #expect(match != nil)
+        #expect(match?.decision == .direct)
+    }
+
+    @Test func longestPrefixWins() {
+        let tree = IPRadixTree()
+
+        // /8 rule.
+        let net8: UInt32 = 10 << 24
+        tree.insert(network: net8, prefixLength: 8,
+                    rule: .ipv4CIDR(network: net8, prefixLength: 8, decision: .proxy))
+
+        // /16 rule.
+        let net16: UInt32 = (10 << 24) | (1 << 16)
+        tree.insert(network: net16, prefixLength: 16,
+                    rule: .ipv4CIDR(network: net16, prefixLength: 16, decision: .direct))
+
+        // 10.1.2.3 → should match /16 (longer prefix).
+        let ip: UInt32 = (10 << 24) | (1 << 16) | (2 << 8) | 3
+        let match = tree.match(ip: ip)
+        #expect(match?.decision == .direct)
+    }
+
+    @Test func noMatchReturnsNil() {
+        let tree = IPRadixTree()
+        tree.insert(network: 0xC0A80000, prefixLength: 24,
+                    rule: .ipv4CIDR(network: 0xC0A80000, prefixLength: 24))
+        // 10.0.0.1 doesn't match 192.168.0.0/24.
+        #expect(tree.match(ip: 0x0A000001) == nil)
+    }
+
+    @Test func exactMatch() {
+        let tree = IPRadixTree()
+        let net: UInt32 = 0xAC100001 // 172.16.0.1/32
+        tree.insert(network: net, prefixLength: 32,
+                    rule: .ipv4CIDR(network: net, prefixLength: 32, decision: .block))
+        #expect(tree.match(ip: net)?.decision == .block)
+        #expect(tree.match(ip: net + 1) == nil)
+    }
+
+    @Test func defaultRouteMatchesAll() {
+        let tree = IPRadixTree()
+        tree.insert(network: 0, prefixLength: 0,
+                    rule: .ipv4CIDR(network: 0, prefixLength: 0, decision: .proxy))
+        #expect(tree.match(ip: 0xFFFFFFFF)?.decision == .proxy)
+        #expect(tree.match(ip: 0)?.decision == .proxy)
+    }
+
+    @Test func countTracksCorrectly() {
+        let tree = IPRadixTree()
+        #expect(tree.count == 0)
+        tree.insert(network: 0x0A000000, prefixLength: 8,
+                    rule: .ipv4CIDR(network: 0x0A000000, prefixLength: 8))
+        #expect(tree.count == 1)
+        // Re‑insert at same prefix — count should not increase.
+        tree.insert(network: 0x0A000000, prefixLength: 8,
+                    rule: .ipv4CIDR(network: 0x0A000000, prefixLength: 8))
+        #expect(tree.count == 1)
+    }
+
+    @Test func removeAllClears() {
+        let tree = IPRadixTree()
+        tree.insert(network: 0x0A000000, prefixLength: 8,
+                    rule: .ipv4CIDR(network: 0x0A000000, prefixLength: 8))
+        tree.removeAll()
+        #expect(tree.count == 0)
+        #expect(tree.match(ip: 0x0A000001) == nil)
+    }
+}
+
+// MARK: - IPRadixTree — 10k Performance
+
+@Suite("IPRadixTree — 10k Rules Performance")
+struct IPRadixTreePerformanceTests {
+
+    @Test func tenThousandInsertsAndLookups() {
+        let tree = IPRadixTree()
+
+        // Insert 10 000 random /24 rules.
+        let ruleCount = 10_000
+        for i in 0 ..< ruleCount {
+            let a = UInt32((i >> 16) & 0xFF)
+            let b = UInt32((i >> 8) & 0xFF)
+            let c = UInt32(i & 0xFF)
+            let network: UInt32 = (a << 24) | (b << 16) | (c << 8)
+            tree.insert(network: network, prefixLength: 24,
+                        rule: .ipv4CIDR(network: network, prefixLength: 24,
+                                        decision: .proxy))
+        }
+        #expect(tree.count == ruleCount)
+
+        // Time 10 000 lookups.
+        let start = ContinuousClock().now
+        for i in 0 ..< ruleCount {
+            let a = UInt32((i >> 16) & 0xFF)
+            let b = UInt32((i >> 8) & 0xFF)
+            let c = UInt32(i & 0xFF)
+            let ip: UInt32 = (a << 24) | (b << 16) | (c << 8) | 1
+            _ = tree.match(ip: ip)
+        }
+        let duration = ContinuousClock().now - start
+        let ms = Double(duration.components.attoseconds) / 1_000_000_000_000_000.0
+        #expect(ms < 100, "10k radix-tree lookups took \(ms)ms, expected < 100ms")
+    }
+}
+
+// MARK: - IPv6 Radix Tree
+
+@Suite("IPv6RadixTree")
+struct IPv6RadixTreeTests {
+
+    @Test func basicIPv6Match() {
+        let tree = IPv6RadixTree()
+        // fd00:a:b:c::/64
+        let upper: UInt64 = 0xFD00_000A_000B_000C
+        tree.insert(upper: upper, lower: 0, prefixLength: 64,
+                    rule: .ipv4CIDR(network: 0, prefixLength: 0, decision: .direct))
+
+        let match = tree.match(upper: upper, lower: 1)
+        #expect(match?.decision == .direct)
+    }
+
+    @Test func noMatchBeyondPrefix() {
+        let tree = IPv6RadixTree()
+        tree.insert(upper: 0xFD00_000A_000B_000C, lower: 0, prefixLength: 64,
+                    rule: .ipv4CIDR(network: 0, prefixLength: 0, decision: .direct))
+        // Different /64 subnet.
+        let match = tree.match(upper: 0xFD00_000A_000B_000D, lower: 0)
+        #expect(match == nil)
+    }
+}
+
+// MARK: - RoutingRule — UserAgent
+
+@Suite("RoutingRule — UserAgent")
+struct RoutingRuleUserAgentTests {
+
+    @Test func userAgentMatches() {
+        let rule = RoutingRule.userAgent(pattern: "Safari", decision: .direct)
+        let ctx = RoutingContext(userAgent: "Mozilla/5.0 Safari/605.1.15")
+        #expect(rule.evaluate(context: ctx) == true)
+    }
+
+    @Test func userAgentCaseInsensitive() {
+        let rule = RoutingRule.userAgent(pattern: "chrome", decision: .proxy)
+        let ctx = RoutingContext(userAgent: "Mozilla Chrome/120.0")
+        #expect(rule.evaluate(context: ctx) == true)
+    }
+
+    @Test func userAgentNoMatch() {
+        let rule = RoutingRule.userAgent(pattern: "Firefox", decision: .proxy)
+        let ctx = RoutingContext(userAgent: "Safari/605.1.15")
+        #expect(rule.evaluate(context: ctx) == false)
+    }
+
+    @Test func userAgentNoContext() {
+        let rule = RoutingRule.userAgent(pattern: "Safari")
+        #expect(rule.evaluate(context: .empty) == false)
+    }
+}
+
+// MARK: - RoutingRule — Logical AND / NOT
+
+@Suite("RoutingRule — Logical Combinations")
+struct RoutingRuleLogicalTests {
+
+    @Test func logicalAndBothMatch() {
+        let r1 = RoutingRule.domainSuffix("apple.com")
+        let r2 = RoutingRule.domainSuffix("google.com")
+        // AND of two different suffixes — a single domain can't match both.
+        let andRule = RoutingRule.logicalAnd([r1, r2])
+        #expect(andRule.evaluate(domain: "www.apple.com") == false)
+    }
+
+    @Test func logicalAndSingleDomain() {
+        let r1 = RoutingRule.domainSuffix("apple.com")
+        let r2 = RoutingRule.domainKeyword("www")
+        let andRule = RoutingRule.logicalAnd([r1, r2])
+        // "www.apple.com" matches suffix "apple.com" AND contains "www".
+        #expect(andRule.evaluate(domain: "www.apple.com") == true)
+        // "store.apple.com" matches suffix but doesn't contain "www".
+        #expect(andRule.evaluate(domain: "store.apple.com") == false)
+    }
+
+    @Test func logicalAndWithUserAgent() {
+        let domainRule = RoutingRule.domainSuffix("apple.com")
+        let uaRule = RoutingRule.userAgent(pattern: "Safari")
+        let andRule = RoutingRule.logicalAnd([domainRule, uaRule])
+
+        // Domain matches, UA matches.
+        #expect(andRule.evaluate(
+            domain: "www.apple.com",
+            context: RoutingContext(userAgent: "Safari/605.1")
+        ) == true)
+
+        // Domain matches, UA doesn't.
+        #expect(andRule.evaluate(
+            domain: "www.apple.com",
+            context: RoutingContext(userAgent: "Chrome/120")
+        ) == false)
+    }
+
+    @Test func logicalNotInverts() {
+        let rule = RoutingRule.domainSuffix("apple.com")
+        let notRule = RoutingRule.logicalNot(rule, decision: .direct)
+        #expect(notRule.evaluate(domain: "www.apple.com") == false)
+        #expect(notRule.evaluate(domain: "google.com") == true)
+    }
+
+    @Test func logicalNotWithIP() {
+        let cidrRule = RoutingRule.ipv4CIDR(
+            network: 0x0A000000, prefixLength: 8
+        )
+        let notRule = RoutingRule.logicalNot(cidrRule, decision: .block)
+        // 10.0.0.1 matches the CIDR → NOT inverts → false.
+        #expect(notRule.evaluate(ip: 0x0A000001) == false)
+        // 192.168.0.1 doesn't match → NOT inverts → true.
+        #expect(notRule.evaluate(ip: 0xC0A80001) == true)
+    }
+}
+
+// MARK: - RoutingRule — ASN
+
+@Suite("RoutingRule — ASN")
+struct RoutingRuleASNTests {
+
+    @Test func asnMatches() {
+        let rule = RoutingRule.ipAsn(asn: 15169, decision: .direct) // Google ASN
+        let ctx = RoutingContext(targetASN: 15169)
+        #expect(rule.evaluate(context: ctx) == true)
+    }
+
+    @Test func asnNoMatch() {
+        let rule = RoutingRule.ipAsn(asn: 15169)
+        let ctx = RoutingContext(targetASN: 714) // Apple ASN
+        #expect(rule.evaluate(context: ctx) == false)
+    }
+
+    @Test func asnNoContext() {
+        let rule = RoutingRule.ipAsn(asn: 15169)
+        #expect(rule.evaluate(context: .empty) == false)
+    }
+}
+
+// MARK: - RoutingEngine — Multi‑Dimension Context
+
+@Suite("RoutingEngine — Multi‑Dimension Context")
+struct RoutingEngineContextTests {
+
+    @Test func userAgentRuleViaEngine() async {
+        let engine = RoutingEngine()
+        await engine.add(rule: .domainSuffix("apple.com", decision: .direct))
+        await engine.add(rule: .userAgent(pattern: "Safari", decision: .proxy))
+
+        let ctx = RoutingContext(userAgent: "Mozilla/5.0 Safari/605")
+        let decision = await engine.route(
+            domain: "google.com",
+            context: ctx
+        )
+        // No domain match, but userAgent matches.
+        #expect(decision == .proxy)
+    }
+
+    @Test func logicalRuleViaEngine() async {
+        let engine = RoutingEngine()
+        let andRule = RoutingRule.logicalAnd([
+            .domainSuffix("apple.com"),
+            .userAgent(pattern: "Safari"),
+        ], decision: .direct)
+        await engine.add(rule: andRule)
+
+        // Both conditions match.
+        let ctx = RoutingContext(userAgent: "Safari/605")
+        let d1 = await engine.route(domain: "www.apple.com", context: ctx)
+        #expect(d1 == .direct)
+
+        // Only domain matches, UA doesn't.
+        let ctx2 = RoutingContext(userAgent: "Chrome/120")
+        let d2 = await engine.route(domain: "www.apple.com", context: ctx2)
+        #expect(d2 != .direct) // Falls through to default (proxy).
+    }
+
+    @Test func generalRuleCount() async {
+        let engine = RoutingEngine()
+        await engine.add(rule: .userAgent(pattern: "TestUA"))
+        await engine.add(rule: .ipAsn(asn: 15169))
+        await engine.add(rule: .logicalNot(.domainSuffix("blocked.com")))
+        let count = await engine.generalRuleCount
+        #expect(count == 3)
+    }
+}
+
+// MARK: - RoutingContext
+
+@Suite("RoutingContext")
+struct RoutingContextTests {
+
+    @Test func emptyContext() {
+        let ctx = RoutingContext.empty
+        #expect(ctx.userAgent == nil)
+        #expect(ctx.targetASN == nil)
+    }
+
+    @Test func contextWithValues() {
+        let ctx = RoutingContext(userAgent: "Test/1.0", targetASN: 12345)
+        #expect(ctx.userAgent == "Test/1.0")
+        #expect(ctx.targetASN == 12345)
+    }
+
+    @Test func equatability() {
+        let a = RoutingContext(userAgent: "A")
+        let b = RoutingContext(userAgent: "A")
+        let c = RoutingContext(userAgent: "B")
+        #expect(a == b)
+        #expect(a != c)
+    }
+}

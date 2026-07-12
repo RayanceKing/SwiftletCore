@@ -75,8 +75,19 @@ public actor RoutingEngine {
 
         case .ipv4CIDR(network: let network, prefixLength: let prefixLength, decision: _):
             cidrMatcher.insert(network: network, prefixLength: prefixLength, rule: rule)
+
+        case .userAgent, .ipAsn, .logicalAnd, .logicalNot:
+            // These rules are stored in the general‑purpose rule list
+            // and evaluated via `evaluate(context:)`.
+            generalRules.append(rule)
         }
     }
+
+    // MARK: - General‑Purpose Rule Store
+
+    /// Rules that require context beyond domain/IP (userAgent, ASN,
+    /// logical combinations).
+    private var generalRules: [RoutingRule] = []
 
     /// Bulk‑loads multiple domain‑suffix rules for the same decision.
     ///
@@ -110,6 +121,59 @@ public actor RoutingEngine {
         domainTrie.removeAll()
         cidrMatcher.removeAll()
         keywordMatcher.removeAll()
+        generalRules.removeAll()
+    }
+
+    // MARK: - Contextual Routing
+
+    /// Evaluates a target with full multi‑dimensional context.
+    ///
+    /// Rule priority (first match wins):
+    /// 1. Domain‑suffix trie
+    /// 2. Domain‑keyword scan
+    /// 3. User‑Agent rules (from generalRules)
+    /// 4. ASN rules (from generalRules)
+    /// 5. Logical combination rules (from generalRules)
+    /// 6. IP‑CIDR table
+    /// 7. Default decision
+    ///
+    /// - Parameters:
+    ///   - domain: Optional domain target.
+    ///   - ip: Optional IPv4 address (host byte order).
+    ///   - context: Additional context (User‑Agent, ASN).
+    /// - Returns: The routing decision.
+    public func route(
+        domain: String? = nil,
+        ip: UInt32? = nil,
+        context: RoutingContext = .empty
+    ) -> RoutingDecision {
+        // 1. Domain‑suffix trie.
+        if let domain = domain, let rule = domainTrie.match(domain: domain) {
+            return rule.decision
+        }
+
+        // 2. Domain‑keyword scan.
+        if let domain = domain, let rule = keywordMatcher.match(domain: domain) {
+            return rule.decision
+        }
+
+        // 3. General‑purpose rules (userAgent, ASN, logical).
+        for rule in generalRules {
+            if rule.evaluate(
+                domain: domain, ip: ip, context: context,
+                domainTrie: domainTrie, cidrMatcher: cidrMatcher
+            ) {
+                return rule.decision
+            }
+        }
+
+        // 4. IP‑CIDR.
+        if let ip = ip, let rule = cidrMatcher.match(ip: ip) {
+            return rule.decision
+        }
+
+        // 5. Default.
+        return defaultDecision
     }
 
     // MARK: - Domain Routing
@@ -183,8 +247,11 @@ public actor RoutingEngine {
     /// Total number of keyword rules.
     public var keywordRuleCount: Int { keywordMatcher.count }
 
+    /// Total general‑purpose rules.
+    public var generalRuleCount: Int { generalRules.count }
+
     /// Total rules across all matchers.
     public var totalRuleCount: Int {
-        domainRuleCount + cidrRuleCount + keywordRuleCount
+        domainRuleCount + cidrRuleCount + keywordRuleCount + generalRuleCount
     }
 }

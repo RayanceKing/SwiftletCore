@@ -49,15 +49,120 @@ public enum RoutingRule: Sendable, Equatable {
     /// Format: `"192.168.0.0/16"`.
     case ipv4CIDR(network: UInt32, prefixLength: Int, decision: RoutingDecision = .direct)
 
+    // MARK: - Multi‑Dimension Rules
+
+    /// Matches when the HTTP `User-Agent` header contains the given pattern.
+    /// Case‑insensitive substring match.  Useful for per‑application routing
+    /// (e.g. route Safari traffic differently from in‑app WebView traffic).
+    case userAgent(pattern: String, decision: RoutingDecision = .proxy)
+
+    /// Matches when the target IP address belongs to the given Autonomous
+    /// System number (for future BGP / GeoIP ASN database integration).
+    case ipAsn(asn: Int, decision: RoutingDecision = .direct)
+
+    /// Logical AND — all sub‑rules must match for this rule to fire.
+    /// Each sub‑rule carries its own decision; the container's `decision`
+    /// is used when the conjunction evaluates to `true`.
+    indirect case logicalAnd([RoutingRule], decision: RoutingDecision = .proxy)
+
+    /// Logical NOT — inverts the match of a single sub‑rule.
+    /// When the sub‑rule does **not** match, this rule fires with its
+    /// associated `decision`.
+    indirect case logicalNot(RoutingRule, decision: RoutingDecision = .proxy)
+
+    // MARK: - Decision Accessor
+
     /// The verdict to apply when this rule matches.
     public var decision: RoutingDecision {
         switch self {
-        case .domainSuffix(_, let d):  return d
-        case .domainKeyword(_, let d): return d
-        case .ipv4CIDR(_, _, let d):   return d
+        case .domainSuffix(_, let d):   return d
+        case .domainKeyword(_, let d):  return d
+        case .ipv4CIDR(_, _, let d):    return d
+        case .userAgent(_, let d):      return d
+        case .ipAsn(_, let d):          return d
+        case .logicalAnd(_, let d):     return d
+        case .logicalNot(_, let d):     return d
         }
     }
+}
 
+// MARK: - Routing Rule Evaluation Context
+
+/// Contextual information passed to rule evaluation for multi‑dimension
+/// matching (User‑Agent, ASN, etc.).
+public struct RoutingContext: Sendable, Equatable {
+    /// The HTTP User‑Agent header value (if available).
+    public var userAgent: String?
+
+    /// The ASN of the target IP (if available from a GeoIP database).
+    public var targetASN: Int?
+
+    public init(userAgent: String? = nil, targetASN: Int? = nil) {
+        self.userAgent = userAgent
+        self.targetASN = targetASN
+    }
+
+    /// An empty context — only domain / IP rules will be evaluated.
+    public static let empty = RoutingContext()
+}
+
+// MARK: - Contextual Rule Evaluation
+
+extension RoutingRule {
+
+    /// Evaluates this rule against domain, IP, and contextual dimensions.
+    ///
+    /// - Parameters:
+    ///   - domain: Optional domain target.
+    ///   - ip: Optional `UInt32` IPv4 address (host byte order).
+    ///   - context: Additional context (User‑Agent, ASN, etc.).
+    ///   - domainTrie: Domain suffix trie for domain‑based sub‑rules.
+    ///   - cidrMatcher: CIDR matcher for IP‑based sub‑rules.
+    /// - Returns: `true` if the rule matches.
+    public func evaluate(
+        domain: String? = nil,
+        ip: UInt32? = nil,
+        context: RoutingContext = .empty,
+        domainTrie: DomainTrie? = nil,
+        cidrMatcher: CIDRMatcher? = nil
+    ) -> Bool {
+        switch self {
+        case .domainSuffix(let suffix, decision: _):
+            guard let domain = domain else { return false }
+            return domain.hasSuffix(suffix) || domain == suffix
+
+        case .domainKeyword(let keyword, decision: _):
+            guard let domain = domain else { return false }
+            return domain.contains(keyword)
+
+        case .ipv4CIDR(let network, let prefixLength, decision: _):
+            guard let ip = ip else { return false }
+            let mask = CIDRParser.mask(prefixLength: prefixLength)
+            return (ip & mask) == (network & mask)
+
+        case .userAgent(let pattern, decision: _):
+            guard let ua = context.userAgent else { return false }
+            return ua.localizedCaseInsensitiveContains(pattern)
+
+        case .ipAsn(let asn, decision: _):
+            guard let targetASN = context.targetASN else { return false }
+            return targetASN == asn
+
+        case .logicalAnd(let rules, decision: _):
+            return rules.allSatisfy {
+                $0.evaluate(
+                    domain: domain, ip: ip, context: context,
+                    domainTrie: domainTrie, cidrMatcher: cidrMatcher
+                )
+            }
+
+        case .logicalNot(let rule, decision: _):
+            return !rule.evaluate(
+                domain: domain, ip: ip, context: context,
+                domainTrie: domainTrie, cidrMatcher: cidrMatcher
+            )
+        }
+    }
 }
 
 // MARK: - CIDR Parsing

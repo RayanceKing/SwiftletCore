@@ -11,6 +11,7 @@
 │                     Inbound (入站)                            │
 │  Socks5/        ← SOCKS5 协议服务器 (RFC 1928)                │
 │  HTTP/          ← HTTP CONNECT 代理服务器 (RFC 7231)          │
+│  NE/            ← VIF 双栈虚拟接口配置器 (IPv4+IPv6+DNS+MTU)   │
 ├──────────────────────────────────────────────────────────────┤
 │                     Stack (协议栈)                            │
 │  IPHeader/      ← IPv4/IPv6 零拷贝数据包解析器                 │
@@ -18,12 +19,14 @@
 │  TCPChecksum    ← TCP 校验和计算 (IPv4/IPv6)                  │
 │  TCPSession     ← 4元组会话跟踪 + NAT 表                      │
 │  TUN2Socks      ← 虚拟 TCP 3次握手 + SOCKS5 桥接              │
+│  TUN2Udp         ← UDP 会话 NAT 桥接 + 回复包组装               │
 ├──────────────────────────────────────────────────────────────┤
 │                     Router (路由)                             │
 │  TrieNode       ← 域名后缀 Trie 树 (Radix Tree)              │
-│  RoutingRule    ← CIDR 最长前缀匹配 / 域名关键词匹配           │
+│  RoutingRule    ← 多维规则 (域名/CIDR/UserAgent/ASN/逻辑)     │
+│  IPRadixTree    ← 位图 Radix Tree (O(32) IPv4 最长前缀)       │
 │  AsyncDNS       ← UDP + DoH 异步 DNS 解析器 (TTL 缓存)       │
-│  RoutingEngine  ← 中央路由决策引擎 (Actor)                    │
+│  RoutingEngine  ← 中央路由决策引擎 (Actor + 上下文路由)       │
 ├──────────────────────────────────────────────────────────────┤
 │                    Outbound (出站)                            │
 │  Shadowsocks/   ← AEAD 加密 (AES-GCM / ChaCha20-Poly1305)    │
@@ -51,6 +54,7 @@
 |------|------|------|
 | **SOCKS5** | `Inbound/Socks5/` | 完整 RFC 1928 实现，支持 `NO AUTH` (0x00) 认证和 `CONNECT` (0x01) 命令，IPv4 / IPv6 / 域名地址类型，异步双向流转发 |
 | **HTTP CONNECT** | `Inbound/HTTP/` | HTTP 代理服务器，解析 `CONNECT host:port` 请求，返回 `HTTP/1.1 200`，转入零拷贝原始流转发 |
+| **VIF Configurator** | `Inbound/NE/` | Apple NetworkExtension 双栈虚拟接口 | IPv4 `198.18.0.1/16` + IPv6 `fd00:a:b:c::1/64`，全局默认路由（`0.0.0.0/0` + `::/0`），DNS 劫持，MTU 1420 |
 
 ### Layer 3/4 协议 (Stack)
 
@@ -61,6 +65,7 @@
 | **TCP** | `Stack/TCPHeader.swift` | RFC 793 段解析器，SYN / SYN-ACK / RST / FIN-ACK 构建器，Data Offset + Flags + 校验和 |
 | **TCP Checksum** | `Stack/TCPChecksum.swift` | IPv4 伪头部 + IPv6 伪头部 16 位 Internet 补码校验和 |
 | **TUN2Socks** | `Stack/TUN2SocksBridge.swift` | 用户空间 TCP 虚拟握手 (SYN → SYN-ACK)，4元组 NAT 会话表，IP 包 → SOCKS5 桥接 |
+| **TUN2Udp** | `Stack/TUN2UdpBridge.swift` | UDP 数据包解析（8 字节头），4 元组 NAT 会话注册表，IPv4 伪头部 UDP 校验和，反向回复包组装 |
 
 ### 路由引擎 (Router)
 
@@ -68,9 +73,10 @@
 |------|------|------|
 | **Domain Trie** | `Router/TrieNode.swift` | 域名后缀 Trie 树，最长匹配优先，O(labels) 查找，10k 规则 < 10µs/次 |
 | **CIDR Matcher** | `Router/RoutingRule.swift` | IPv4 最长前缀匹配，O(32) 查找，支持 `/0` 到 `/32` |
+| **IP Radix Tree** | `Router/IPRadixTree.swift` | IPv4/IPv6 位图压缩前缀树，O(32/128) 单次查找，10k 规则插入+查找 < 100ms |
 | **Keyword Matcher** | `Router/TrieNode.swift` | 域名关键词线性扫描 |
 | **Async DNS** | `Router/AsyncDNSResolver.swift` | UDP (端口 53) + DoH (DNS over HTTPS) 双传输，TTL 缓存，A / AAAA 并发查询 |
-| **Routing Engine** | `Router/RoutingEngine.swift` | Actor 中央决策引擎，优先级：域名后缀 → 关键词 → CIDR → 默认 |
+| **Routing Engine** | `Router/RoutingEngine.swift` | Actor 中央决策引擎，优先级：域名后缀 → 关键词 → UserAgent/ASN/逻辑 → CIDR → 默认 |
 
 ### 出站协议 (Outbound)
 
@@ -113,7 +119,7 @@
 # 编译
 swift build
 
-# 运行全部 507 个测试
+# 运行全部 599 个测试
 swift test
 ```
 
@@ -129,18 +135,20 @@ swift test
 ### 测试覆盖
 
 ```
-461 tests | 99 suites | 0 warnings
+571 tests | 122 suites | 0 warnings
 
 入站:
   SOCKS5:               1 test
   HTTP Inbound:        13 tests
+  VIF Configurator:    36 tests
 
 协议栈:
   IP Parser:           12 tests
   TUN2Socks:            4 tests
+  TUN2Udp:             28 tests (UDP 解析 + 校验和 + NAT + 回复组装)
 
 路由:
-  Router:              13 tests (含 10k 规则 Trie + CIDR 性能基准)
+  Router:              42 tests (Trie/CIDR/RadixTree/UserAgent/ASN/逻辑规则 + 10k 性能基准)
 
 出站:
   Shadowsocks:         10 tests

@@ -30,6 +30,7 @@
 ├──────────────────────────────────────────────────────────────┤
 │                    Outbound (出站)                            │
 │  Shadowsocks/   ← AEAD 加密 (AES-GCM / ChaCha20-Poly1305)    │
+│  ShadowsocksR/  ← SSR 协议 + 混淆插件 (auth_aes128 / tls1.2) │
 │  Trojan/        ← Trojan-TLS 出站协议                         │
 │  TLS/           ← REALITY TLS ClientHello 修改器 + ShadowTLS  │
 │  VLESS/         ← VLESS-REALITY + WebSocket 出站引擎          │
@@ -37,6 +38,8 @@
 │  VMess/         ← VMess v1 协议 (MD5 + AES-128-CFB)          │
 │  Hysteria2/     ← QUIC 帧 + Salamander 混淆引擎               │
 │  TUIC/           ← TUIC v5 二进制帧 + 流多路分解器              │
+│  Snell/          ← Snell v4 PSK 协议 + AES‑128‑GCM 会话加密     │
+│  gRPC/           ← gRPC 5 字节帧编解码 + HTTP/2 流合成          │
 │  AnyTLS/        ← 对称字节混淆引擎 (XOR + xorshift32)         │
 │  Obfs/           ← Simple-Obfs HTTP/TLS 流伪装引擎             │
 │  HTTP/          ← HTTP CONNECT 出站隧道                       │
@@ -83,6 +86,7 @@
 | 协议 | 模块 | 加密 / 认证方式 | 说明 |
 |------|------|-----------------|------|
 | **Shadowsocks** | `Outbound/Shadowsocks/` | `aes-128-gcm` / `aes-256-gcm` / `chacha20-poly1305` | CryptoKit 硬件 AEAD，HKDF-SHA1 密钥派生，0x3FFF 分块，Salt + Nonce + Tag |
+| **ShadowsocksR** | `Outbound/ShadowsocksR/` | AES‑CFB / ChaCha20 + 协议插件 + 混淆插件 | SSR 协议插件层 (`origin`, `auth_aes128_sha1`, `auth_chain_a`) + 混淆插件层 (`plain`, `http_simple`, `tls1.2_ticket_auth`)，支持 `ssr://` Base64 URI 解析 |
 | **Trojan** | `Outbound/Trojan/` | TLS 1.3 + SHA-224 | SHA-224 密码哈希 (56 字节 hex)，SOCKS5 地址编码，TLS 加密通道 |
 | **REALITY** | `Outbound/TLS/` | 原始 TLS 1.3 字节修改 | ClientHello 解析/序列化，Auth Key + Padding 扩展注入，SNI 替换，长度重算 |
 | **ShadowTLS v3** | `Outbound/ShadowTLS/` | TLS 1.3 握手劫持 + HMAC-SHA256 挑战注入 | 三阶段状态机 + v3 挑战令牌：HMAC(password, ClientHello.random).prefix(8) 注入 Session ID，ServerHello 响应验证 |
@@ -92,6 +96,8 @@
 | **WireGuard** | `Outbound/WireGuard/` | Curve25519 ECDH + HKDF-SHA256 + ChaCha20-Poly1305 | Noise_IKpsk2_25519 握手 (Type 1/2)，Type 4 Transport Data 加密/解密，零拷贝 ByteBuffer 封装 |
 | **Hysteria 2** | `Outbound/Hysteria2/` | QUIC Varints + 自定义帧 + Salamander XOR 混淆 | Type 0x401 TCP/0x402 UDP 请求帧，0x403 数据帧，Salamander 动态填充防 DPI |
 | **TUIC v5** | `Outbound/TUIC/` | 原始 QUIC 流二进制帧 + Actor 多路复用 | 5 种帧类型编解码，零拷贝 ByteBuffer，边界安全 nil‑on‑partial 流解码器，Actor 并发流管理器（开流/发包/关流），50 路并发隔离 |
+| **Snell v4** | `Outbound/Snell/` | PSK + HKDF-SHA256 + AES-128-GCM | 16 字节 Nonce → 会话密钥派生，加密元数据帧 (addrType + address + port + command)，握手验证 + 流式 AEAD 加解密 |
+| **gRPC Transport** | `Outbound/gRPC/` | HTTP/2 流多路复用 + 5 字节 gRPC 帧 | gRPCFrameCodec (0x00 + 4B BE 长度)，HTTP/2 流合成 (:method=POST, :path=/{svc}/Tun)，支持 VMess/VLESS/Trojan+gRPC 组合 |
 | **Simple-Obfs** | `Outbound/Obfs/` | HTTP/TLS 流伪装 | HTTP 模式前置 GET 请求头 + 剥离 HTTP 响应头，TLS 模式前置 ClientHello + 剥离握手记录至 Application Data |
 | **Streaming HTTP Obfs** | `Outbound/Obfs/` | HTTP POST 流式分块编码/解码 | 每块代理数据独立包装为 HTTP POST（动态 Content-Length），入站 HTTP 响应流式解帧（Header 扫描 → 精确 Body 切片），支持 VMess+HTTP / VLESS+HTTP / Trojan+HTTP 组合 |
 | **AnyTLS** | `Outbound/AnyTLS/` | XOR + xorshift32 PRNG | 对称混淆，种子 → 密钥流，原地 XOR 突变，双重 XOR = 还原 |
@@ -119,7 +125,7 @@
 # 编译
 swift build
 
-# 运行全部 635 个测试
+# 运行全部测试
 swift test
 ```
 
@@ -135,7 +141,7 @@ swift test
 ### 测试覆盖
 
 ```
-623 tests | 134 suites | 0 warnings
+795+ tests | 158+ suites | 0 warnings
 
 入站:
   SOCKS5:               1 test
@@ -152,6 +158,7 @@ swift test
 
 出站:
   Shadowsocks:         10 tests
+  ShadowsocksR:        15 tests (URI 解析 + 协议/混淆插件 + 状态机)
   Trojan:              10 tests
   REALITY / ShadowTLS: 51 tests (TLS 修改 8 + ShadowTLS v3 43)
   VLESS-REALITY:       13 tests
@@ -160,6 +167,8 @@ swift test
   WireGuard:           61 tests (Noise 21 + Transport Data 40)
   Hysteria 2:          38 tests (帧/QUIC/Salamander/UDP)
   TUIC v5:            130 tests (帧编解码 84 + 多路复用 46)
+  Snell v4:            30 tests (密钥派生 + AEAD + 握手 + 元数据帧)
+  gRPC Transport:      24 tests (帧编解码 + 分段 + 配置 + 订阅解析)
   Simple-Obfs:         27 tests
   Streaming HTTP Obfs: 32 tests (POST 包装 + 响应解帧 + OutboundProtocol 工厂)
   AnyTLS:               8 tests
@@ -168,6 +177,9 @@ swift test
 
 集成:
   Ecosystem Pipeline:   1 test
+  Outbound Connection Pool: 26 tests
+  Subscription Parser:  70 tests
+  Secure DNS:           36 tests (竞速 + 配置 + 数据包)
   Legacy:               3 tests
   Omni Protocol:        5 tests (HTTP + UDP 联动)
 ```

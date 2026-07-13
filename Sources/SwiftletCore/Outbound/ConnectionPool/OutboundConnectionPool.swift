@@ -88,6 +88,9 @@ public struct PoolKey: Sendable, Hashable, CustomStringConvertible {
             let obfsTag = obfs.map { ":\($0)" } ?? ""
             return "ss:\(cipher):\(hash32(password))\(obfsTag)"
 
+        case .shadowsocksr(_, _, let cipher, let password, let proto, _, let obfs, _):
+            return "ssr:\(cipher):\(hash32(password)):\(proto):\(obfs)"
+
         case .vmess(_, _, let uuid, let aid, let transport, let tls, _, _, _, _, _):
             let tlsTag = tls ? "+TLS" : ""
             return "vmess:\(uuid):\(aid):\(transport)\(tlsTag)"

@@ -73,6 +73,9 @@ public final class SubscriptionParser {
         if lower.hasPrefix("ss://") {
             return parseShadowsocks(cleaned)
         }
+        if lower.hasPrefix("ssr://") {
+            return parseShadowsocksR(cleaned)
+        }
         if lower.hasPrefix("vmess://") {
             return parseVMess(cleaned)
         }
@@ -689,6 +692,75 @@ public final class SubscriptionParser {
             return (String(parts[0]), port)
         }
         return (str, nil)
+    }
+
+    // MARK: - ShadowsocksR (ssr://)
+
+    /// Parses a ShadowsocksR `ssr://` URI with Base64‑encoded payload.
+    ///
+    /// Format: `ssr://base64(host:port:protocol:method:obfs:base64_password/?params)`
+    private static func parseShadowsocksR(_ raw: String) -> ProxyNodeConfiguration? {
+        let body = raw.hasPrefix("ssr://")
+            ? String(raw.dropFirst(6))
+            : String(raw.dropFirst(6))
+
+        // ---- 1. Strip fragment --------------------------------------------
+        let (bodyWithoutFragment, _) = extractFragment(from: body)
+
+        // ---- 2. Base64 decode the main payload ----------------------------
+        guard let decoded = decodeBase64URLSafe(bodyWithoutFragment) else {
+            return nil
+        }
+
+        // ---- 3. Split main part and query ---------------------------------
+        let (mainPart, queryItems): (String, [(String, String)])
+        if let queryIdx = decoded.firstIndex(of: "?") {
+            mainPart = String(decoded[..<queryIdx])
+            let queryString = String(decoded[decoded.index(after: queryIdx)...])
+            queryItems = parseQueryItems(queryString)
+        } else {
+            mainPart = decoded
+            queryItems = []
+        }
+
+        // ---- 4. Parse colon‑delimited SSR fields --------------------------
+        // Format: host:port:protocol:method:obfs:base64_password
+        let parts = mainPart.components(separatedBy: ":")
+        guard parts.count >= 6 else { return nil }
+
+        let host = parts[0]
+        guard let port = UInt16(parts[1]), !host.isEmpty, port > 0 else {
+            return nil
+        }
+        let protocolMode = parts[2]
+        let cipher = parts[3]
+        let obfsMode = parts[4]
+
+        // Decode the base64‑encoded password (last field).
+        let passwordBase64 = parts[5]
+        let password = decodeBase64URLSafe(passwordBase64) ?? passwordBase64
+
+        // ---- 5. Extract base64‑encoded query parameters --------------------
+        var protocolParam: String?
+        var obfsParam: String?
+
+        if let obfsParamB64 = queryValue(for: "obfsparam", in: queryItems) {
+            obfsParam = decodeBase64URLSafe(obfsParamB64) ?? obfsParamB64
+        }
+        if let protoParamB64 = queryValue(for: "protoparam", in: queryItems) {
+            protocolParam = decodeBase64URLSafe(protoParamB64) ?? protoParamB64
+        }
+
+        return .shadowsocksr(
+            host: host,
+            port: port,
+            cipher: cipher,
+            password: password,
+            protocolMode: protocolMode,
+            protocolParam: protocolParam,
+            obfsMode: obfsMode,
+            obfsParam: obfsParam
+        )
     }
 
     // MARK: - Obfs Plugin Parsing

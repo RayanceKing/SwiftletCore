@@ -196,9 +196,31 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
         insecure: Bool
     )
 
-    // MARK: - Snell v4
+    // MARK: - ShadowsocksR
 
-    /// Snell v4 (PSK‑based, AES‑128‑GCM session encryption).
+    /// ShadowsocksR (SSR) — legacy protocol with protocol + obfs plugins.
+    ///
+    /// - Parameters:
+    ///   - host: Proxy server hostname or IP.
+    ///   - port: Proxy server port.
+    ///   - cipher: Stream cipher identifier (e.g. `"aes-128-cfb"`).
+    ///   - password: Pre‑shared key for cipher and plugin key derivation.
+    ///   - protocolMode: Protocol plugin (`"origin"`, `"auth_aes128_sha1"`, etc.).
+    ///   - protocolParam: Optional protocol plugin parameter (base64‑encoded).
+    ///   - obfsMode: Obfuscation plugin (`"plain"`, `"http_simple"`, `"tls1.2_ticket_auth"`).
+    ///   - obfsParam: Optional obfuscation plugin parameter (base64‑encoded).
+    case shadowsocksr(
+        host: String,
+        port: UInt16,
+        cipher: String,
+        password: String,
+        protocolMode: String,
+        protocolParam: String?,
+        obfsMode: String,
+        obfsParam: String?
+    )
+
+    // MARK: - Snell v4
     ///
     /// - Parameters:
     ///   - host: Proxy server hostname or IP.
@@ -240,6 +262,7 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
     public var label: String {
         switch self {
         case .shadowsocks:  return "Shadowsocks"
+        case .shadowsocksr: return "ShadowsocksR"
         case .vmess:        return "VMess"
         case .vless:        return "VLESS"
         case .trojan:       return "Trojan"
@@ -254,6 +277,7 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
     public var host: String {
         switch self {
         case .shadowsocks(let h, _, _, _, _, _):  return h
+        case .shadowsocksr(let h, _, _, _, _, _, _, _): return h
         case .vmess(let h, _, _, _, _, _, _, _, _, _, _): return h
         case .vless(let h, _, _, _, _, _, _, _, _, _, _, _, _, _, _): return h
         case .trojan(let h, _, _, _, _, _, _, _, _, _):  return h
@@ -268,6 +292,7 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
     public var port: UInt16 {
         switch self {
         case .shadowsocks(_, let p, _, _, _, _):  return p
+        case .shadowsocksr(_, let p, _, _, _, _, _, _): return p
         case .vmess(_, let p, _, _, _, _, _, _, _, _, _): return p
         case .vless(_, let p, _, _, _, _, _, _, _, _, _, _, _, _, _): return p
         case .trojan(_, let p, _, _, _, _, _, _, _, _):  return p
@@ -287,6 +312,9 @@ extension ProxyNodeConfiguration: CustomStringConvertible {
         case .shadowsocks(let h, let p, let c, _, let obfs, _):
             let obfsTag = obfs.map { "+\($0)" } ?? ""
             return "ss://\(h):\(p) [\(c)\(obfsTag)]"
+
+        case .shadowsocksr(let h, let p, let c, _, let proto, _, let obfs, _):
+            return "ssr://\(h):\(p) [\(c)/\(proto)/\(obfs)]"
 
         case .vmess(let h, let p, _, _, let t, let tls, _, _, _, let svc, _):
             let tlsTag = tls ? "+TLS" : ""

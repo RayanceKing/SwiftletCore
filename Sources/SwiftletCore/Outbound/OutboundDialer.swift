@@ -149,6 +149,19 @@ public enum OutboundProtocol: Sendable, Equatable {
         authority: String?
     )
 
+    // MARK: - ShadowsocksR Variant
+
+    /// ShadowsocksR with protocol plugin and obfuscation plugin layers.
+    /// Pipeline: `SSR Obfs → SSR Protocol → Shadowsocks Cipher → TCP`
+    case shadowsocksR(
+        cipher: String,
+        password: String,
+        protocolMode: String,
+        protocolParam: String?,
+        obfsMode: String,
+        obfsParam: String?
+    )
+
     // MARK: - Diagnostic
 
     /// A human‑readable label for this protocol stack.
@@ -168,6 +181,7 @@ public enum OutboundProtocol: Sendable, Equatable {
         case .trojanGRPC:              return "Trojan+gRPC"
         case .vlessGRPC:               return "VLESS+gRPC"
         case .vmessGRPC:               return "VMess+gRPC"
+        case .shadowsocksR:            return "ShadowsocksR"
         }
     }
 
@@ -212,6 +226,8 @@ public enum OutboundProtocol: Sendable, Equatable {
              .trojanSimpleObfs,
              .trojanGRPC, .vlessGRPC, .vmessGRPC:
             return true
+        case .shadowsocksR:
+            return false
         }
     }
 

@@ -196,6 +196,22 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
         insecure: Bool
     )
 
+    // MARK: - Snell v4
+
+    /// Snell v4 (PSK‑based, AES‑128‑GCM session encryption).
+    ///
+    /// - Parameters:
+    ///   - host: Proxy server hostname or IP.
+    ///   - port: Proxy server port.
+    ///   - psk: Pre‑shared key string.
+    ///   - version: Snell protocol version (typically 4).
+    case snell(
+        host: String,
+        port: UInt16,
+        psk: String,
+        version: Int
+    )
+
     // MARK: - WireGuard
 
     /// WireGuard (Noise_IKpsk2 + Transport Data AEAD).
@@ -229,6 +245,7 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
         case .trojan:       return "Trojan"
         case .hysteria2:    return "Hysteria2"
         case .tuic:         return "TUIC v5"
+        case .snell:        return "Snell v4"
         case .wireguard:    return "WireGuard"
         }
     }
@@ -242,6 +259,7 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
         case .trojan(let h, _, _, _, _, _, _, _, _, _):  return h
         case .hysteria2(let h, _, _, _, _, _, _):  return h
         case .tuic(let h, _, _, _, _, _, _, _):    return h
+        case .snell(let h, _, _, _):            return h
         case .wireguard: return ""  // endpoint is composite
         }
     }
@@ -255,6 +273,7 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
         case .trojan(_, let p, _, _, _, _, _, _, _, _):  return p
         case .hysteria2(_, let p, _, _, _, _, _): return p
         case .tuic(_, let p, _, _, _, _, _, _):  return p
+        case .snell(_, let p, _, _):          return p
         case .wireguard: return 0
         }
     }
@@ -291,6 +310,9 @@ extension ProxyNodeConfiguration: CustomStringConvertible {
 
         case .tuic(let h, let p, _, _, let cc, _, _, _):
             return "tuic://\(h):\(p) [cc=\(cc)]"
+
+        case .snell(let h, let p, _, let v):
+            return "snell://\(h):\(p) [v\(v)]"
 
         case .wireguard(let pk, let ppk, let ep, _, _, _, _):
             return "wireguard://\(ep) [pk=\(pk.prefix(8))… ppk=\(ppk.prefix(8))…]"

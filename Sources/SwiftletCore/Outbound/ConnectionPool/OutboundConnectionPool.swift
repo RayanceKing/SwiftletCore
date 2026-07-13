@@ -110,6 +110,9 @@ public struct PoolKey: Sendable, Hashable, CustomStringConvertible {
         case .tuic(_, _, let uuid, let password, let cc, _, _, _):
             return "tuic:\(uuid):\(hash32(password)):\(cc)"
 
+        case .snell(_, _, let psk, let version):
+            return "snell:\(hash32(psk)):v\(version)"
+
         case .wireguard(let pk, let ppk, _, let psk, _, _, _):
             let pskTag = psk.map { ":\(hash32($0))" } ?? ""
             return "wg:\(pk.prefix(32)):\(ppk.prefix(32))\(pskTag)"

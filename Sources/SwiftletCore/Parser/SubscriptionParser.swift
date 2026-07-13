@@ -88,6 +88,9 @@ public final class SubscriptionParser {
         if lower.hasPrefix("tuic://") {
             return parseTUIC(cleaned)
         }
+        if lower.hasPrefix("snell://") {
+            return parseSnell(cleaned)
+        }
         if lower.hasPrefix("wireguard://") || lower.hasPrefix("wg://") {
             return parseWireGuard(cleaned)
         }
@@ -452,6 +455,32 @@ public final class SubscriptionParser {
             alpn: alpn,
             insecure: insecure
         )
+    }
+
+    // MARK: - Snell v4 (snell://)
+
+    /// Parses a Snell v4 URI: `snell://psk@host:port?version=4`
+    private static func parseSnell(_ raw: String) -> ProxyNodeConfiguration? {
+        let body = raw.hasPrefix("snell://")
+            ? String(raw.dropFirst(8))
+            : String(raw.dropFirst(8))
+
+        let (bodyWithoutFragment, _) = extractFragment(from: body)
+        let (core, queryItems) = splitQuery(from: bodyWithoutFragment)
+
+        // Format: psk@host:port
+        guard let atIndex = core.firstIndex(of: "@") else { return nil }
+        let psk = String(core[..<atIndex])
+            .removingPercentEncoding ?? String(core[..<atIndex])
+        let hostPortPart = String(core[core.index(after: atIndex)...])
+
+        let (host, port) = parseHostPort(hostPortPart)
+        guard let port = port, !psk.isEmpty else { return nil }
+
+        let version = queryValue(for: "version", in: queryItems)
+            .flatMap(Int.init) ?? 4
+
+        return .snell(host: host, port: port, psk: psk, version: version)
     }
 
     // MARK: - WireGuard (wireguard:// / wg://)

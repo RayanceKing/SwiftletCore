@@ -253,6 +253,35 @@ public final class SwiftletEngine: @unchecked Sendable {
         )
     }
 
+    // MARK: - Start (Configuration Raw Text)
+
+    /// Parses a Surge/Loon‑style configuration string and starts the
+    /// engine with the extracted nodes, rules, and settings.
+    ///
+    /// ```swift
+    /// let config = """
+    /// [Proxy]
+    /// MySS = ss, example.com, 8388, aes-128-gcm, myPassword
+    /// [Rule]
+    /// DOMAIN-SUFFIX, google.com, Proxy
+    /// """
+    /// try await engine.start(configurationRawText: config)
+    /// ```
+    public func start(configurationRawText: String) async throws {
+        let result = UnifiedConfigurationParser.parse(configurationRawText)
+
+        guard !result.nodes.isEmpty else {
+            throw SwiftletEngineError.alreadyRunning  // no valid nodes
+        }
+
+        try await start(
+            nodes: result.nodes,
+            rules: result.rules,
+            localSocksPort: 1080,
+            localHttpPort: 8080
+        )
+    }
+
     // MARK: - Shutdown
 
     /// Gracefully tears down the engine: drains the connection pool,

@@ -71,7 +71,7 @@ public final class gRPCFrameEncoder: ChannelOutboundHandler,
     /// Creates a new gRPC frame encoder.
     ///
     /// - Parameter compressionFlag: Compression flag byte (default `0x00`).
-    public init(compressionFlag: UInt8 = gRPCUncompressed) {
+    public init(compressionFlag: UInt8 = 0x00) {
         self.compressionFlag = compressionFlag
     }
 
@@ -205,7 +205,7 @@ public final class gRPCFrameDecoder: ChannelInboundHandler,
             expectedPayloadLength = nil
 
             // Fire the unwrapped payload up the pipeline.
-            context.fireChannelRead(wrapOutboundOut(payload))
+            context.fireChannelRead(wrapInboundOut(payload))
 
             // Continue the loop to check for another complete frame.
         }

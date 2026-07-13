@@ -237,9 +237,9 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
     public var host: String {
         switch self {
         case .shadowsocks(let h, _, _, _, _, _):  return h
-        case .vmess(let h, _, _, _, _, _, _, _, _): return h
-        case .vless(let h, _, _, _, _, _, _, _, _, _, _, _, _): return h
-        case .trojan(let h, _, _, _, _, _, _, _):  return h
+        case .vmess(let h, _, _, _, _, _, _, _, _, _, _): return h
+        case .vless(let h, _, _, _, _, _, _, _, _, _, _, _, _, _, _): return h
+        case .trojan(let h, _, _, _, _, _, _, _, _, _):  return h
         case .hysteria2(let h, _, _, _, _, _, _):  return h
         case .tuic(let h, _, _, _, _, _, _, _):    return h
         case .wireguard: return ""  // endpoint is composite
@@ -250,9 +250,9 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
     public var port: UInt16 {
         switch self {
         case .shadowsocks(_, let p, _, _, _, _):  return p
-        case .vmess(_, let p, _, _, _, _, _, _, _): return p
-        case .vless(_, let p, _, _, _, _, _, _, _, _, _, _, _): return p
-        case .trojan(_, let p, _, _, _, _, _, _):  return p
+        case .vmess(_, let p, _, _, _, _, _, _, _, _, _): return p
+        case .vless(_, let p, _, _, _, _, _, _, _, _, _, _, _, _, _): return p
+        case .trojan(_, let p, _, _, _, _, _, _, _, _):  return p
         case .hysteria2(_, let p, _, _, _, _, _): return p
         case .tuic(_, let p, _, _, _, _, _, _):  return p
         case .wireguard: return 0

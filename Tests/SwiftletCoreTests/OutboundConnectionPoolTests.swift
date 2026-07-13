@@ -48,12 +48,14 @@ struct PoolKeyFingerprintTests {
         let a = ProxyNodeConfiguration.vmess(
             host: "v.com", port: 443, uuid: "u", alterId: 0,
             transport: "tcp", tlsEnabled: false,
-            sni: nil, wsPath: nil, wsHost: nil
+            sni: nil, wsPath: nil, wsHost: nil,
+            serviceName: nil, authority: nil
         )
         let b = ProxyNodeConfiguration.vmess(
             host: "v.com", port: 443, uuid: "u", alterId: 64,
             transport: "tcp", tlsEnabled: false,
-            sni: nil, wsPath: nil, wsHost: nil
+            sni: nil, wsPath: nil, wsHost: nil,
+            serviceName: nil, authority: nil
         )
         #expect(PoolKey(from: a) != PoolKey(from: b))
     }
@@ -69,13 +71,15 @@ struct PoolKeyFingerprintTests {
             host: "v.com", port: 443, uuid: "u",
             flow: nil, xtls: false, sni: "a.com", pbk: nil,
             transport: "tcp", wsPath: nil, wsHost: nil,
-            fingerprint: nil, shortId: nil, spiderX: nil
+            fingerprint: nil, shortId: nil, spiderX: nil,
+            serviceName: nil, authority: nil
         )
         let b = ProxyNodeConfiguration.vless(
             host: "v.com", port: 443, uuid: "u",
             flow: nil, xtls: false, sni: "b.com", pbk: nil,
             transport: "tcp", wsPath: nil, wsHost: nil,
-            fingerprint: nil, shortId: nil, spiderX: nil
+            fingerprint: nil, shortId: nil, spiderX: nil,
+            serviceName: nil, authority: nil
         )
         #expect(PoolKey(from: a) != PoolKey(from: b))
     }
@@ -252,7 +256,8 @@ private func vmess(
 ) -> ProxyNodeConfiguration {
     .vmess(host: host, port: port, uuid: uuid, alterId: 0,
            transport: transport, tlsEnabled: tls,
-           sni: nil, wsPath: nil, wsHost: nil)
+           sni: nil, wsPath: nil, wsHost: nil,
+           serviceName: nil, authority: nil)
 }
 
 private func vless(
@@ -261,14 +266,16 @@ private func vless(
     .vless(host: host, port: 443, uuid: uuid,
            flow: flow, xtls: flow != nil, sni: nil, pbk: nil,
            transport: "tcp", wsPath: nil, wsHost: nil,
-           fingerprint: nil, shortId: nil, spiderX: nil)
+           fingerprint: nil, shortId: nil, spiderX: nil,
+           serviceName: nil, authority: nil)
 }
 
 private func trojan(
     host: String, password: String = "pwd"
 ) -> ProxyNodeConfiguration {
     .trojan(host: host, port: 443, password: password,
-            transport: "tcp", sni: nil, wsPath: nil, wsHost: nil, fingerprint: nil)
+            transport: "tcp", sni: nil, wsPath: nil, wsHost: nil, fingerprint: nil,
+            serviceName: nil, authority: nil)
 }
 
 private func bridge(host: String) -> ProxyChannelPoolBridgeHandler {

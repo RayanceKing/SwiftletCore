@@ -88,17 +88,17 @@ public struct PoolKey: Sendable, Hashable, CustomStringConvertible {
             let obfsTag = obfs.map { ":\($0)" } ?? ""
             return "ss:\(cipher):\(hash32(password))\(obfsTag)"
 
-        case .vmess(_, _, let uuid, let aid, let transport, let tls, _, _, _):
+        case .vmess(_, _, let uuid, let aid, let transport, let tls, _, _, _, _, _):
             let tlsTag = tls ? "+TLS" : ""
             return "vmess:\(uuid):\(aid):\(transport)\(tlsTag)"
 
         case .vless(_, _, let uuid, let flow, let xtls, let sni, let pbk,
-                    _, _, _, let fp, _, _):
+                    _, _, _, let fp, _, _, _, _):
             let flowTag = flow ?? ""
             let sniTag = sni ?? ""
             return "vless:\(uuid):\(flowTag):\(sniTag):\(pbk ?? ""):\(fp ?? ""):\(xtls ? "xtls" : "")"
 
-        case .trojan(_, _, let password, let transport, let sni, _, _, let fp):
+        case .trojan(_, _, let password, let transport, let sni, _, _, let fp, _, _):
             let sniTag = sni ?? ""
             return "trojan:\(hash32(password)):\(transport):\(sniTag):\(fp ?? "")"
 

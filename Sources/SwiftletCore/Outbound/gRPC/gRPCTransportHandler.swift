@@ -30,6 +30,7 @@
 
 @preconcurrency import NIOCore
 @preconcurrency import NIOHTTP2
+@preconcurrency import NIOHPACK
 import Foundation
 
 // MARK: - gRPC Transport Configuration

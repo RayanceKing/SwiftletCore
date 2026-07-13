@@ -137,7 +137,7 @@ struct SubscriptionParserVMessTests {
 
         let node = SubscriptionParser.parse(uri: uri)
         guard case .vmess(let host, let port, let uuid, let aid, let transport,
-                          let tls, let sni, let wsPath, let wsHost) = node else {
+                          let tls, let sni, let wsPath, let wsHost, _, _) = node else {
             #expect(Bool(false), "Expected vmess node"); return
         }
         #expect(host == "vmess.example.com")
@@ -164,7 +164,7 @@ struct SubscriptionParserVMessTests {
         let b64 = jsonData.base64EncodedString()
         let uri = "vmess://\(b64)"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .vmess(_, let port, let uuid, let aid, _, _, _, _, _) = node else {
+        guard case .vmess(_, let port, let uuid, let aid, _, _, _, _, _, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(port == 8080)
@@ -185,7 +185,7 @@ struct SubscriptionParserVMessTests {
         let b64 = jsonData.base64EncodedString()
         let uri = "vmess://\(b64)"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .vmess(_, let port, _, _, _, let tls, _, _, _) = node else {
+        guard case .vmess(_, let port, _, _, _, let tls, _, _, _, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(port == 10086)
@@ -209,7 +209,7 @@ struct SubscriptionParserVMessTests {
         let b64 = jsonData.base64EncodedString()
         let uri = "vmess://\(b64)"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .vmess(_, _, _, _, let transport, let tls, _, let path, _) = node else {
+        guard case .vmess(_, _, _, _, let transport, let tls, _, let path, _, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(transport == "grpc")
@@ -233,7 +233,7 @@ struct SubscriptionParserVMessTests {
         let uri = "vmess://\(b64)"
         let node = SubscriptionParser.parse(uri: uri)
         #expect(node != nil)
-        if case .vmess(let host, _, _, _, _, _, _, _, _) = node {
+        if case .vmess(let host, _, _, _, _, _, _, _, _, _, _) = node {
             #expect(host == "unpadded.test")
         }
     }
@@ -265,7 +265,7 @@ struct SubscriptionParserVMessTests {
         let uri = "vmess://\(b64)"
         let node = SubscriptionParser.parse(uri: uri)
         guard case .vmess(let host, let port, _, let aid, let transport,
-                          let tls, let sni, _, _) = node else {
+                          let tls, let sni, _, _, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(host == "minimal.node")
@@ -297,7 +297,7 @@ struct SubscriptionParserVLESSesTests {
     @Test func parseBasicVLESS() {
         let uri = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@vless.example.com:443"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .vless(let host, let port, let uuid, _, _, _, _, let transport, _, _, _, _, _) = node else {
+        guard case .vless(let host, let port, let uuid, _, _, _, _, let transport, _, _, _, _, _, _, _) = node else {
             #expect(Bool(false), "Expected vless node"); return
         }
         #expect(host == "vless.example.com")
@@ -315,7 +315,7 @@ struct SubscriptionParserVLESSesTests {
             + "&sid=abcd"
         let node = SubscriptionParser.parse(uri: uri)
         guard case .vless(_, _, let uuid, let flow, let xtls, let sni, let pbk,
-                          _, _, _, let fp, let sid, _) = node else {
+                          _, _, _, let fp, let sid, _, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(uuid == "my-uuid")
@@ -334,7 +334,7 @@ struct SubscriptionParserVLESSesTests {
             + "&host=cdn-override.com"
         let node = SubscriptionParser.parse(uri: uri)
         guard case .vless(_, _, _, _, _, _, _, let transport,
-                          let wsPath, let wsHost, _, _, _) = node else {
+                          let wsPath, let wsHost, _, _, _, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(transport == "ws")
@@ -346,7 +346,7 @@ struct SubscriptionParserVLESSesTests {
         let uri = "vless://spx-uuid@spx.node.com:443"
             + "?security=reality&sni=spx-target.com&spx=%2Fapi%2Fspx"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .vless(_, _, _, _, _, let sni, _, _, _, _, _, _, let spx) = node else {
+        guard case .vless(_, _, _, _, _, let sni, _, _, _, _, _, _, let spx, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(sni == "spx-target.com")
@@ -356,7 +356,7 @@ struct SubscriptionParserVLESSesTests {
     @Test func parseVLESSWithFlowOnly() {
         let uri = "vless://flow-uuid@flow.node.com:443?flow=xtls-rprx-vision"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .vless(_, _, _, let flow, let xtls, _, _, _, _, _, _, _, _) = node else {
+        guard case .vless(_, _, _, let flow, let xtls, _, _, _, _, _, _, _, _, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(flow == "xtls-rprx-vision")
@@ -366,7 +366,7 @@ struct SubscriptionParserVLESSesTests {
     @Test func parseVLESSIPv6Endpoint() {
         let uri = "vless://ipv6-uuid@[fd12:3456:789a:1::1]:8080"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .vless(let host, let port, _, _, _, _, _, _, _, _, _, _, _) = node else {
+        guard case .vless(let host, let port, _, _, _, _, _, _, _, _, _, _, _, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(host == "fd12:3456:789a:1::1")
@@ -382,7 +382,7 @@ struct SubscriptionParserTrojanTests {
     @Test func parseBasicTrojan() {
         let uri = "trojan://mySecurePassword@trojan.server.com:443"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .trojan(let host, let port, let password, let transport, _, _, _, _) = node else {
+        guard case .trojan(let host, let port, let password, let transport, _, _, _, _, _, _) = node else {
             #expect(Bool(false), "Expected trojan node"); return
         }
         #expect(host == "trojan.server.com")
@@ -395,7 +395,7 @@ struct SubscriptionParserTrojanTests {
         let uri = "trojan://pwd@ws-trojan.com:443"
             + "?type=ws&path=%2Ftrojan-ws&host=host-override.com"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .trojan(_, _, _, let transport, _, let wsPath, let wsHost, _) = node else {
+        guard case .trojan(_, _, _, let transport, _, let wsPath, let wsHost, _, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(transport == "ws")
@@ -406,7 +406,7 @@ struct SubscriptionParserTrojanTests {
     @Test func parseTrojanWithSNI() {
         let uri = "trojan://secure@trojan-sni.com:443?sni=trojan-sni.com"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .trojan(_, _, _, _, let sni, _, _, _) = node else {
+        guard case .trojan(_, _, _, _, let sni, _, _, _, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(sni == "trojan-sni.com")
@@ -415,7 +415,7 @@ struct SubscriptionParserTrojanTests {
     @Test func parseTrojanWithFingerprint() {
         let uri = "trojan://pwd@fp.node.com:443?fp=firefox"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .trojan(_, _, _, _, _, _, _, let fp) = node else {
+        guard case .trojan(_, _, _, _, _, _, _, let fp, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(fp == "firefox")
@@ -424,7 +424,7 @@ struct SubscriptionParserTrojanTests {
     @Test func parseTrojanURLEncodedPassword() {
         let uri = "trojan://p%40ssw0rd%21@encoded.node.com:443"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .trojan(_, _, let password, _, _, _, _, _) = node else {
+        guard case .trojan(_, _, let password, _, _, _, _, _, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(password == "p@ssw0rd!")
@@ -744,7 +744,8 @@ struct ProxyNodeConfigurationMetaTests {
         let node = ProxyNodeConfiguration.vmess(
             host: "v", port: 2, uuid: "u", alterId: 0,
             transport: "tcp", tlsEnabled: false,
-            sni: nil, wsPath: nil, wsHost: nil
+            sni: nil, wsPath: nil, wsHost: nil,
+            serviceName: nil, authority: nil
         )
         #expect(node.label == "VMess")
     }
@@ -754,7 +755,8 @@ struct ProxyNodeConfigurationMetaTests {
             host: "v", port: 3, uuid: "u",
             flow: nil, xtls: false, sni: nil, pbk: nil,
             transport: "tcp", wsPath: nil, wsHost: nil,
-            fingerprint: nil, shortId: nil, spiderX: nil
+            fingerprint: nil, shortId: nil, spiderX: nil,
+            serviceName: nil, authority: nil
         )
         #expect(node.label == "VLESS")
     }
@@ -762,7 +764,8 @@ struct ProxyNodeConfigurationMetaTests {
     @Test func trojanLabelIsCorrect() {
         let node = ProxyNodeConfiguration.trojan(
             host: "t", port: 4, password: "p",
-            transport: "tcp", sni: nil, wsPath: nil, wsHost: nil, fingerprint: nil
+            transport: "tcp", sni: nil, wsPath: nil, wsHost: nil, fingerprint: nil,
+            serviceName: nil, authority: nil
         )
         #expect(node.label == "Trojan")
     }
@@ -812,7 +815,8 @@ struct ProxyNodeConfigurationMetaTests {
         let vm = ProxyNodeConfiguration.vmess(
             host: "x", port: 1, uuid: "u", alterId: 0,
             transport: "tcp", tlsEnabled: false,
-            sni: nil, wsPath: nil, wsHost: nil
+            sni: nil, wsPath: nil, wsHost: nil,
+            serviceName: nil, authority: nil
         )
         #expect(ss != vm)
     }
@@ -820,7 +824,8 @@ struct ProxyNodeConfigurationMetaTests {
     @Test func hostGetterWorks() {
         let node = ProxyNodeConfiguration.trojan(
             host: "getter.test", port: 443, password: "p",
-            transport: "tcp", sni: nil, wsPath: nil, wsHost: nil, fingerprint: nil
+            transport: "tcp", sni: nil, wsPath: nil, wsHost: nil, fingerprint: nil,
+            serviceName: nil, authority: nil
         )
         #expect(node.host == "getter.test")
     }
@@ -830,7 +835,8 @@ struct ProxyNodeConfigurationMetaTests {
             host: "p.test", port: 9999, uuid: "u",
             flow: nil, xtls: false, sni: nil, pbk: nil,
             transport: "tcp", wsPath: nil, wsHost: nil,
-            fingerprint: nil, shortId: nil, spiderX: nil
+            fingerprint: nil, shortId: nil, spiderX: nil,
+            serviceName: nil, authority: nil
         )
         #expect(node.port == 9999)
     }
@@ -884,7 +890,7 @@ struct SubscriptionParserIntegrationTests {
         let b64 = jsonStr.data(using: .utf8)!.base64EncodedString()
         let uri = "vmess://\(b64)#FullIntegration"
         let node = SubscriptionParser.parse(uri: uri)
-        guard case .vmess(let h, let p, let id, let aid, let net, let tls, let sni, let path, let host) = node else {
+        guard case .vmess(let h, let p, let id, let aid, let net, let tls, let sni, let path, let host, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(h == "full.vmess.com")
@@ -904,7 +910,7 @@ struct SubscriptionParserIntegrationTests {
             + "&flow=xtls-rprx-vision&fp=chrome&sid=6ba7b8&spx=%2Freality"
         let node = SubscriptionParser.parse(uri: uri)
         guard case .vless(let h, let p, let id, let flow, let xtls, let sni, let pbk,
-                          let net, _, _, let fp, let sid, let spx) = node else {
+                          let net, _, _, let fp, let sid, let spx, _, _) = node else {
             #expect(Bool(false)); return
         }
         #expect(h == "reality-full.com")

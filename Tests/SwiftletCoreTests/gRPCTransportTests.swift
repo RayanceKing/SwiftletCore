@@ -144,19 +144,19 @@ final class gRPCFrameCodecTests: XCTestCase {
         let decoder = gRPCFrameDecoder()
         let channel = EmbeddedChannel(handler: decoder)
 
-        // Build a frame: 0x00 + length(16) + "SegmentedDataTest"
-        // Total frame = 5 + 16 = 21 bytes.
+        // Build a frame: 0x00 + length(17) + "SegmentedDataTest"
+        // Total frame = 5 + 17 = 22 bytes.
         // Segment 1: first 7 bytes (header + first 2 payload bytes: "Se")
-        // Segment 2: remaining 14 payload bytes ("gmentedDataTest")
+        // Segment 2: remaining 15 payload bytes ("gmentedDataTest")
         var segment1 = ByteBuffer()
         segment1.writeInteger(UInt8(0x00), endianness: .big, as: UInt8.self)
-        segment1.writeInteger(UInt32(16), endianness: .big, as: UInt32.self)
+        segment1.writeInteger(UInt32(17), endianness: .big, as: UInt32.self)
         segment1.writeString("Se")
 
         try channel.writeInbound(segment1)
 
         // No complete frame yet — decoder should not fire anything.
-        var partial = try channel.readInbound(as: ByteBuffer.self)
+        let partial = try channel.readInbound(as: ByteBuffer.self)
         XCTAssertNil(partial, "Decoder must not fire incomplete frames")
 
         // Deliver the remaining payload bytes.
@@ -167,7 +167,7 @@ final class gRPCFrameCodecTests: XCTestCase {
         // Now the complete frame should be emitted.
         var output = try channel.readInbound(as: ByteBuffer.self)
         XCTAssertNotNil(output)
-        XCTAssertEqual(output?.readString(length: 16), "SegmentedDataTest")
+        XCTAssertEqual(output?.readString(length: 17), "SegmentedDataTest")
 
         XCTAssertNoThrow(try channel.finish())
     }
@@ -206,7 +206,7 @@ final class gRPCFrameCodecTests: XCTestCase {
         XCTAssertEqual(second?.readString(length: 2), "BB")
 
         // No more frames.
-        var third = try channel.readInbound(as: ByteBuffer.self)
+        let third = try channel.readInbound(as: ByteBuffer.self)
         XCTAssertNil(third)
 
         XCTAssertNoThrow(try channel.finish())
@@ -257,7 +257,7 @@ final class gRPCFrameCodecTests: XCTestCase {
 
         try channel.writeInbound(frame)
 
-        var output = try channel.readInbound(as: ByteBuffer.self)
+        let output = try channel.readInbound(as: ByteBuffer.self)
         XCTAssertNotNil(output)
         XCTAssertEqual(output?.readableBytes, 65536)
 
@@ -283,7 +283,7 @@ final class gRPCFrameCodecTests: XCTestCase {
         XCTAssertNoThrow(try channel.writeOutbound(original))
 
         // Read the encoded frame from the outbound side.
-        var encoded = try channel.readOutbound(as: ByteBuffer.self)
+        let encoded = try channel.readOutbound(as: ByteBuffer.self)
         XCTAssertNotNil(encoded)
 
         // Feed the encoded frame into the inbound side (decoder).
@@ -318,7 +318,7 @@ final class gRPCFrameCodecTests: XCTestCase {
         try channel.writeInbound(partial)
 
         // No frame should fire — payload never arrived.
-        var result = try channel.readInbound(as: ByteBuffer.self)
+        let result = try channel.readInbound(as: ByteBuffer.self)
         XCTAssertNil(result, "No frame should fire for incomplete data")
 
         // Simulate channel close and finish.

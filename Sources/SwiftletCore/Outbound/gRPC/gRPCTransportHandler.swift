@@ -82,7 +82,7 @@ internal final class gRPCStreamChannelPromiseHandler: ChannelInboundHandler,
     public func channelActive(context: ChannelHandlerContext) {
         promise.succeed(context.channel)
         // Remove ourselves — we're only needed for the activation signal.
-        context.pipeline.removeHandler(context: context, promise: nil)
+        _ = context.pipeline.syncOperations.removeHandler(context: context)
     }
 
     public func errorCaught(context: ChannelHandlerContext, error: Error) {
@@ -158,15 +158,18 @@ public final class gRPCTransportHandler: ChannelInboundHandler,
             // This closure is called for each new stream created by the
             // remote peer (server‑push).  We don't expect server‑push in
             // gRPC proxy usage, so we just set up a basic handler.
-            streamChannel, _ in
-            streamChannel.pipeline.addHandler(ChannelHandlerThatDoesNothing())
+            streamChannel in
+            streamChannel.pipeline.addHandler(NoOpHandler())
         }
 
         self.multiplexer = multiplexer
 
+        // Extract non-Sendable refs before the @Sendable closure.
+        let channel = context.channel
+
         context.channel.pipeline.addHandler(multiplexer).flatMap {
             // ---- 2. Create the gRPC stream --------------------------------
-            self.createGRPCStream(channel: context.channel, loop: loop)
+            self.createGRPCStream(channel: channel, loop: loop)
         }.flatMap { streamChannel in
             // ---- 3. Install gRPC codec on the stream channel ---------------
             streamChannel.pipeline.addGRPCFrameCodec().flatMap {
@@ -203,32 +206,52 @@ public final class gRPCTransportHandler: ChannelInboundHandler,
         let authority = config.authority ?? host
         let path = "/\(config.serviceName)/Tun"
 
-        // Build the request headers as a `HPACKHeaders` instance.
-        let headers = HPACKHeaders([
-            (":method",     "POST"),
-            (":scheme",     config.tlsEnabled ? "https" : "http"),
-            (":path",       path),
-            (":authority",  authority),
-            ("content-type", "application/grpc"),
-            ("te",          "trailers"),
-        ])
-
-        // Create the stream and send the HEADERS frame.
-        let promise = loop.makePromise(of: Channel.self)
-
-        multiplexer.createStreamChannel(promise: promise) { streamChannel, streamID in
-            // Send the HEADERS frame on the stream channel.
-            streamChannel.writeAndFlush(
-                ByteBuffer(string: "HEADERS: \(headers)"),
-                promise: nil
+        // Create the stream.  The multiplexer's inbound stream initializer
+        // configures the pipeline; we just need to activate the stream by
+        // sending the gRPC request headers.
+        multiplexer.createStreamChannel(promise: streamChannelPromise) { [config] streamChannel in
+            let headers = HPACKHeaders([
+                (":method",     "POST"),
+                (":scheme",     config.tlsEnabled ? "https" : "http"),
+                (":path",       path),
+                (":authority",  authority),
+                ("content-type", "application/grpc"),
+                ("te",          "trailers"),
+            ])
+            // Configure the stream to send headers on active.
+            return streamChannel.pipeline.addHandler(
+                gRPCStreamHeadersHandler(headers: headers)
             )
-            // The real implementation would send an actual `HTTP2Frame`
-            // with the headers.  We use the NIOHTTP2 API directly:
-            let headersFrame = HTTP2Frame(streamID: streamID, payload: .headers(.init(headers: headers)))
-            return streamChannel.writeAndFlush(headersFrame)
         }
 
-        return promise.futureResult
+        return streamChannelPromise.futureResult
+    }
+}
+
+// MARK: - Stream Headers Handler
+
+/// Sends the gRPC request HEADERS frame when the stream channel becomes
+/// active, then removes itself from the pipeline.
+internal final class gRPCStreamHeadersHandler: ChannelInboundHandler,
+                                                @unchecked Sendable {
+    public typealias InboundIn = Any
+
+    private let headers: HPACKHeaders
+
+    init(headers: HPACKHeaders) {
+        self.headers = headers
+    }
+
+    public func channelActive(context: ChannelHandlerContext) {
+        // Send the HEADERS frame on the stream channel.
+        // The NIOHTTP2 layer automatically wraps this into the correct
+        // HTTP2Frame for the stream.
+        context.writeAndFlush(
+            NIOAny(HTTP2Frame(streamID: 0, payload: .headers(.init(headers: headers)))),
+            promise: nil
+        )
+        // Remove ourselves — headers only need to be sent once.
+        _ = context.pipeline.syncOperations.removeHandler(context: context)
     }
 }
 
@@ -236,7 +259,7 @@ public final class gRPCTransportHandler: ChannelInboundHandler,
 
 /// A minimal handler that does nothing — used for unexpected server‑push
 /// streams.
-internal final class ChannelHandlerThatDoesNothing: ChannelInboundHandler {
+internal final class NoOpHandler: ChannelInboundHandler, @unchecked Sendable {
     public typealias InboundIn = Any
     public init() {}
     public func channelRead(context: ChannelHandlerContext, data: NIOAny) {}

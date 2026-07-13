@@ -157,6 +157,15 @@ public final class TUN2SocksBridge: @unchecked Sendable {
             destinationPort: tcpHeader.destinationPort
         )
 
+        // ---- Diagnostic hook: track new TUN session ---------------------
+        Task {
+            await SessionDiagnosticsTracker.shared.trackNewSession(
+                inbound: .tun,
+                client: "\(key.sourceIP):\(key.sourcePort)",
+                target: "\(key.destinationIP):\(key.destinationPort)"
+            )
+        }
+
         // ---- Dispatch based on flags and state ---------------------------
         return try processSegment(
             packet: packet,

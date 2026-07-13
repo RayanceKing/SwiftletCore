@@ -269,6 +269,12 @@ public enum OutboundProtocol: Sendable, Equatable {
         if let pooled = await OutboundConnectionPool.shared.acquireChannel(
             for: configuration, on: loop
         ) {
+            // Diagnostic: mark pool reuse (fire-and-forget).
+            Task {
+                await SessionDiagnosticsTracker.shared.markPoolReused(
+                    id: UUID()  // placeholder — real impl ties to session ID
+                )
+            }
             // Locate the bridge handler and mark it as leased.
             if let bridge = try? await pooled.pipeline.handler(
                 type: ProxyChannelPoolBridgeHandler.self

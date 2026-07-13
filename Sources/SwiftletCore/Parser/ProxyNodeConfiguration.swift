@@ -67,6 +67,8 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
     ///   - sni: Optional TLS SNI override.
     ///   - wsPath: Optional WebSocket path.
     ///   - wsHost: Optional WebSocket Host header override.
+    ///   - serviceName: Optional gRPC service name (e.g. `"TunService"`).
+    ///   - authority: Optional gRPC :authority pseudo‑header override.
     case vmess(
         host: String,
         port: UInt16,
@@ -76,7 +78,9 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
         tlsEnabled: Bool,
         sni: String?,
         wsPath: String?,
-        wsHost: String?
+        wsHost: String?,
+        serviceName: String?,
+        authority: String?
     )
 
     // MARK: - VLESS
@@ -97,6 +101,8 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
     ///   - fingerprint: Optional TLS fingerprint (`"chrome"`, `"firefox"`, etc.).
     ///   - shortId: Optional REALITY shortId.
     ///   - spiderX: Optional REALITY spiderX path.
+    ///   - serviceName: Optional gRPC service name (e.g. `"TunService"`).
+    ///   - authority: Optional gRPC :authority pseudo‑header override.
     case vless(
         host: String,
         port: UInt16,
@@ -110,7 +116,9 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
         wsHost: String?,
         fingerprint: String?,
         shortId: String?,
-        spiderX: String?
+        spiderX: String?,
+        serviceName: String?,
+        authority: String?
     )
 
     // MARK: - Trojan
@@ -126,6 +134,8 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
     ///   - wsPath: Optional WebSocket path.
     ///   - wsHost: Optional WebSocket Host header.
     ///   - fingerprint: Optional TLS fingerprint.
+    ///   - serviceName: Optional gRPC service name (e.g. `"TunService"`).
+    ///   - authority: Optional gRPC :authority pseudo‑header override.
     case trojan(
         host: String,
         port: UInt16,
@@ -134,7 +144,9 @@ public enum ProxyNodeConfiguration: Sendable, Equatable {
         sni: String?,
         wsPath: String?,
         wsHost: String?,
-        fingerprint: String?
+        fingerprint: String?,
+        serviceName: String?,
+        authority: String?
     )
 
     // MARK: - Hysteria 2
@@ -257,18 +269,21 @@ extension ProxyNodeConfiguration: CustomStringConvertible {
             let obfsTag = obfs.map { "+\($0)" } ?? ""
             return "ss://\(h):\(p) [\(c)\(obfsTag)]"
 
-        case .vmess(let h, let p, _, _, let t, let tls, _, _, _):
+        case .vmess(let h, let p, _, _, let t, let tls, _, _, _, let svc, _):
             let tlsTag = tls ? "+TLS" : ""
-            return "vmess://\(h):\(p) [\(t)\(tlsTag)]"
+            let grpcTag = svc.map { " grpc=\($0)" } ?? ""
+            return "vmess://\(h):\(p) [\(t)\(tlsTag)\(grpcTag)]"
 
-        case .vless(let h, let p, _, let f, _, let sni, _, let t, _, _, _, _, _):
+        case .vless(let h, let p, _, let f, _, let sni, _, let t, _, _, _, _, _, let svc, _):
             let flowTag = f.map { " flow=\($0)" } ?? ""
             let sniTag = sni.map { " sni=\($0)" } ?? ""
-            return "vless://\(h):\(p) [\(t)\(flowTag)\(sniTag)]"
+            let grpcTag = svc.map { " grpc=\($0)" } ?? ""
+            return "vless://\(h):\(p) [\(t)\(flowTag)\(sniTag)\(grpcTag)]"
 
-        case .trojan(let h, let p, _, let t, let sni, _, _, _):
+        case .trojan(let h, let p, _, let t, let sni, _, _, _, let svc, _):
             let sniTag = sni.map { " sni=\($0)" } ?? ""
-            return "trojan://\(h):\(p) [\(t)\(sniTag)]"
+            let grpcTag = svc.map { " grpc=\($0)" } ?? ""
+            return "trojan://\(h):\(p) [\(t)\(sniTag)\(grpcTag)]"
 
         case .hysteria2(let h, let p, _, let obfs, _, _, _):
             let obfsTag = obfs.map { " obfs=\($0)" } ?? ""

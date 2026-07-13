@@ -229,6 +229,10 @@ public final class SubscriptionParser {
         let wsPath = json["path"] as? String
         let wsHost = json["host"] as? String
 
+        // gRPC transport parameters.
+        let serviceName = json["serviceName"] as? String
+        let authority = json["authority"] as? String
+
         guard !host.isEmpty, port > 0, !uuid.isEmpty else {
             return nil
         }
@@ -242,7 +246,9 @@ public final class SubscriptionParser {
             tlsEnabled: tlsEnabled,
             sni: sni,
             wsPath: wsPath,
-            wsHost: wsHost
+            wsHost: wsHost,
+            serviceName: serviceName,
+            authority: authority
         )
     }
 
@@ -277,6 +283,10 @@ public final class SubscriptionParser {
         let shortId = queryValue(for: "sid", in: queryItems)
         let spiderX = queryValue(for: "spx", in: queryItems)
 
+        // gRPC transport parameters.
+        let serviceName = queryValue(for: "serviceName", in: queryItems)
+        let authority = queryValue(for: "authority", in: queryItems)
+
         let xtls = (security == "reality" || flow?.contains("xtls") == true)
 
         return .vless(
@@ -292,7 +302,9 @@ public final class SubscriptionParser {
             wsHost: wsHost,
             fingerprint: fingerprint,
             shortId: shortId,
-            spiderX: spiderX
+            spiderX: spiderX,
+            serviceName: serviceName,
+            authority: authority
         )
     }
 
@@ -322,6 +334,10 @@ public final class SubscriptionParser {
         let wsHost = queryValue(for: "host", in: queryItems)
         let fingerprint = queryValue(for: "fp", in: queryItems)
 
+        // gRPC transport parameters.
+        let serviceName = queryValue(for: "serviceName", in: queryItems)
+        let authority = queryValue(for: "authority", in: queryItems)
+
         return .trojan(
             host: host,
             port: port,
@@ -330,7 +346,9 @@ public final class SubscriptionParser {
             sni: sni,
             wsPath: wsPath,
             wsHost: wsHost,
-            fingerprint: fingerprint
+            fingerprint: fingerprint,
+            serviceName: serviceName,
+            authority: authority
         )
     }
 

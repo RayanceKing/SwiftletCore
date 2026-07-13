@@ -122,6 +122,33 @@ public enum OutboundProtocol: Sendable, Equatable {
         obfsHost: String     // TLS SNI
     )
 
+    // MARK: - gRPC‑Wrapped Variants
+
+    /// Trojan tunnelled through gRPC streaming (HTTP/2 + gRPC frame).
+    /// Pipeline: `Trojan → gRPCFrameCodec → HTTP/2 Stream → TCP`
+    case trojanGRPC(
+        host: String,
+        port: UInt16,
+        password: String,
+        serviceName: String,
+        authority: String?
+    )
+
+    /// VLESS tunnelled through gRPC streaming.
+    case vlessGRPC(
+        uuid: String,
+        serviceName: String,
+        authority: String?
+    )
+
+    /// VMess tunnelled through gRPC streaming.
+    case vmessGRPC(
+        uuid: String,
+        alterId: Int = 0,
+        serviceName: String,
+        authority: String?
+    )
+
     // MARK: - Diagnostic
 
     /// A human‑readable label for this protocol stack.
@@ -138,6 +165,9 @@ public enum OutboundProtocol: Sendable, Equatable {
         case .shadowsocksHttp:         return "Shadowsocks+HTTP"
         case .trojanSimpleObfs:        return "Trojan+SimpleObfs"
         case .shadowsocksSimpleTLSObfs: return "Shadowsocks+SimpleTLS"
+        case .trojanGRPC:              return "Trojan+gRPC"
+        case .vlessGRPC:               return "VLESS+gRPC"
+        case .vmessGRPC:               return "VMess+gRPC"
         }
     }
 
@@ -145,6 +175,16 @@ public enum OutboundProtocol: Sendable, Equatable {
     public var isHTTPWrapped: Bool {
         switch self {
         case .vmessHttp, .vlessHttp, .trojanHttp, .shadowsocksHttp:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Whether this protocol stack uses gRPC transport.
+    public var isGRPC: Bool {
+        switch self {
+        case .trojanGRPC, .vlessGRPC, .vmessGRPC:
             return true
         default:
             return false
@@ -169,7 +209,8 @@ public enum OutboundProtocol: Sendable, Equatable {
             return false
         case .trojan, .vless, .vmess,
              .vmessHttp, .vlessHttp, .trojanHttp,
-             .trojanSimpleObfs:
+             .trojanSimpleObfs,
+             .trojanGRPC, .vlessGRPC, .vmessGRPC:
             return true
         }
     }

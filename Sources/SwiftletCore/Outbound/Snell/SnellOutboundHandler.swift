@@ -118,7 +118,7 @@ public final class SnellOutboundHandler: ChannelDuplexHandler,
 
     public func channelActive(context: ChannelHandlerContext) {
         // ---- 1. Create the Snell session ---------------------------------
-        let (nonce, newSession) = SnellCryptoEngine.newSession(psk: psk)
+        let (_, newSession) = SnellCryptoEngine.newSession(psk: psk)
         self.session = newSession
 
         // ---- 2. Build and send the handshake frame -----------------------

@@ -331,11 +331,11 @@ final class ShadowsocksRObfsPluginTests: XCTestCase {
 
         // Feed a mock HTTP response.
         let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
-        var responseBuf = ByteBuffer(string: response)
+        let responseBuf = ByteBuffer(string: response)
         try channel.writeInbound(responseBuf)
 
         // After stripping response, the handler should forward payload.
-        var data = ByteBuffer(string: "stream-data")
+        let data = ByteBuffer(string: "stream-data")
         try channel.writeInbound(data)
 
         var output = try channel.readInbound(as: ByteBuffer.self)

@@ -147,7 +147,7 @@ public final class SSRObfsPluginHandler: ChannelDuplexHandler,
         record.append(0x00)
 
         // Cipher suites length (2).
-        let csLenPos = record.count
+        let _ = record.count  // csLenPos — position marker.
         record.append(0x00); record.append(0x02)
         // Cipher suite: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (0xC02F).
         record.append(0xC0); record.append(0x2F)

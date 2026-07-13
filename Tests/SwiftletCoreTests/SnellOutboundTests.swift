@@ -140,7 +140,7 @@ final class SnellMetadataFrameTests: XCTestCase {
         // The ciphertext must be decryptable.
         let rest = frame.suffix(from: 16)
         let handshakeSession = SnellCryptoEngine.session(from: nonce, psk: psk)
-        let success = try SnellCryptoEngine.verifyHandshakeResponse(
+        _ = try SnellCryptoEngine.verifyHandshakeResponse(
             data: rest,
             session: handshakeSession
         )
@@ -278,7 +278,7 @@ final class SnellSessionAEADTests: XCTestCase {
         }
 
         // Decrypt with a fresh session (same PSK + nonce).
-        let (_, session2) = SnellCryptoEngine.newSession(psk: "order-psk")
+        _ = SnellCryptoEngine.newSession(psk: "order-psk")
         // Override the nonce to match session1.
         let restoreSession = SnellCryptoEngine.session(
             from: session.nonce, psk: "order-psk"

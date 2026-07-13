@@ -164,13 +164,21 @@ public final class gRPCTransportHandler: ChannelInboundHandler,
 
         self.multiplexer = multiplexer
 
-        // Extract non-Sendable refs before the @Sendable closure.
+        // ---- 1b.  Install the multiplexer synchronously (on event loop)
+        //           to avoid Sendable warnings from async addHandler.
+        let pipe = context.channel.pipeline
+        do {
+            try pipe.syncOperations.addHandler(multiplexer)
+        } catch {
+            streamChannelPromise.fail(error)
+            return
+        }
+
+        // Extract non‑Sendable refs before @Sendable closures.
         let channel = context.channel
 
-        context.channel.pipeline.addHandler(multiplexer).flatMap {
-            // ---- 2. Create the gRPC stream --------------------------------
-            self.createGRPCStream(channel: channel, loop: loop)
-        }.flatMap { streamChannel in
+        // ---- 2. Create the gRPC stream ---------------------------------
+        createGRPCStream(channel: channel, loop: loop).flatMap { streamChannel in
             // ---- 3. Install gRPC codec on the stream channel ---------------
             streamChannel.pipeline.addGRPCFrameCodec().flatMap {
                 // ---- 4. Install the activation promise handler -------------

@@ -1,37 +1,72 @@
 //===----------------------------------------------------------------------===//
 //
 //  TUN2UdpBridge.swift
-//  SwiftletCore — User‑Space UDP Session NAT Bridge
+//  SwiftletCore — Full Cone NAT (Type A) UDP Session Bridge
 //
-//  Expands the TUN‑layer stack to process Layer 3 UDP packets.  It parses
-//  raw IP datagrams carrying UDP segments, maintains a 4‑tuple NAT session
-//  registry, forwards inner payloads to the outbound proxy pipeline, and
-//  assembles reverse‑direction reply packets for injection back into the
-//  Apple `packetFlow` virtual channel.
+//  Implements RFC 4787 Endpoint‑Independent Mapping (EIM) and Endpoint‑
+//  Independent Filtering (EIF) for user‑space UDP NAT.  Replaces the
+//  legacy Symmetric 4‑tuple layout with a 2‑tuple endpoint‑splicing
+//  matrix that achieves NAT Type A (Full Cone) compatibility —
+//  essential for Nintendo Switch, PlayStation, and Xbox gaming consoles.
 //
 //  Architecture
 //  ------------
 //  ```
-//  NEPacketTunnelFlow (TUN read)
-//       │
-//       ▼
-//  TUN2UdpBridge.processInbound(_:)
-//       │
-//       ├── new session?  → register in NAT table
-//       ├── existing?     → lookup, forward payload
-//       └── reply?        → buildInboundUdpPacket → TUN write
-//       │
-//       ▼
-//  UdpAssociationManager → Outbound Proxy
+//                    ┌───────────────────────────────┐
+//  Client            │        TUN2UdpBridge           │
+//  (192.168.1.x)     │                                │
+//     │              │  EIMRegistry                   │
+//     │ UDP → SvrA   │  ┌─────────────────────────┐   │
+//     │  src:1001     │  │ EIM(192.168.1.x:1001)   │   │
+//     │              │  │   → outbound socket #1   │   │
+//     │ UDP → SvrB   │  │   → flows: [A:53, B:443] │   │
+//     │  src:1001     │  └─────────────────────────┘   │
+//     │              │                                │
+//     ▼              │  EIF: any remote can punch in  │
+//  SvrC ──UDP──►     │  → matched to EIM endpoint     │
+//  (unsolicited)     │  → forwarded to client 1001    │
+//                    └───────────────────────────────┘
 //  ```
+//
+//  Key Design Properties
+//  ---------------------
+//  • Each local (SrcIP, SrcPort) maps to exactly ONE outbound proxy
+//    socket, regardless of how many distinct remote hosts it contacts.
+//  • Unsolicited inbound packets from ANY unassociated external host
+//    targeting an active EIM port are accepted and forwarded (Full Cone).
+//  • Bi‑directional activity refreshes session TTL (30 s idle timeout).
+//  • Aggressive non‑blocking sweep prevents memory bloat.
 //
 //===----------------------------------------------------------------------===//
 
 import Foundation
 
-// MARK: - UDP Session Key
+// MARK: - EIM Endpoint (2‑Tuple Primary Key)
 
-/// Uniquely identifies a virtual UDP session by its 4‑tuple.
+/// Identifies a local client endpoint for Endpoint‑Independent Mapping.
+///
+/// Two packets from the same `(srcIP, srcPort)` reuse the same outbound
+/// proxy association regardless of their destination — the foundation
+/// of Full Cone NAT.
+public struct UdpEIMEndpoint: Sendable, Hashable, CustomStringConvertible {
+    public let sourceIP: IPv4Address
+    public let sourcePort: UInt16
+
+    public init(sourceIP: IPv4Address, sourcePort: UInt16) {
+        self.sourceIP = sourceIP
+        self.sourcePort = sourcePort
+    }
+
+    public var description: String {
+        "\(sourceIP):\(sourcePort)"
+    }
+}
+
+// MARK: - Legacy Session Key (4‑Tuple Flow Identifier)
+
+/// A full 4‑tuple key used for reply routing and flow tracking within
+/// an EIM endpoint.  Kept for backwards compatibility with existing
+/// reply‑assembly APIs.
 public struct UdpBridgeSessionKey: Sendable, Hashable, CustomStringConvertible {
     public let sourceIP: IPv4Address
     public let sourcePort: UInt16
@@ -50,7 +85,12 @@ public struct UdpBridgeSessionKey: Sendable, Hashable, CustomStringConvertible {
         self.destinationPort = destinationPort
     }
 
-    /// The reverse key (for matching reply packets).
+    /// The EIM endpoint derived from this 4‑tuple.
+    public var eim: UdpEIMEndpoint {
+        UdpEIMEndpoint(sourceIP: sourceIP, sourcePort: sourcePort)
+    }
+
+    /// The reverse key (for matching reply packets via legacy APIs).
     public var reversed: UdpBridgeSessionKey {
         UdpBridgeSessionKey(
             sourceIP: destinationIP,
@@ -65,65 +105,207 @@ public struct UdpBridgeSessionKey: Sendable, Hashable, CustomStringConvertible {
     }
 }
 
-// MARK: - UDP Session
+// MARK: - Full Cone Session
 
-/// Metadata for a single virtual UDP session tracked by the bridge.
+/// Metadata for a Full Cone NAT session pinned to a single EIM endpoint.
+///
+/// Multiple 4‑tuple flows can be active simultaneously through the same
+/// endpoint; all share a single outbound proxy association.
 public final class UdpBridgeSession: @unchecked Sendable {
-    public let key: UdpBridgeSessionKey
+    /// The EIM endpoint that owns this session.
+    public let eim: UdpEIMEndpoint
+
+    /// Creation timestamp.
     public let createdAt: Date
+
+    /// Last activity timestamp (updated on any outbound or inbound packet).
     public private(set) var lastActivity: Date
 
-    public init(key: UdpBridgeSessionKey) {
-        self.key = key
+    /// All 4‑tuple flows currently active through this endpoint.
+    public var flows: Set<UdpBridgeSessionKey>
+
+    /// The outbound proxy channel identifier (set externally by the
+    /// outbound transport layer when a proxy socket is allocated).
+    public var outboundChannelID: String?
+
+    public init(eim: UdpEIMEndpoint) {
+        self.eim = eim
         self.createdAt = Date()
         self.lastActivity = Date()
+        self.flows = []
+        self.outboundChannelID = nil
     }
 
+    /// Legacy convenience initialiser from a 4‑tuple key.
+    public init(key: UdpBridgeSessionKey) {
+        self.eim = key.eim
+        self.createdAt = Date()
+        self.lastActivity = Date()
+        self.flows = [key]
+        self.outboundChannelID = nil
+    }
+
+    /// Record bi‑directional activity.
     public func markActivity() { lastActivity = Date() }
+
+    /// Register a new 4‑tuple flow within this EIM endpoint.
+    public func registerFlow(_ key: UdpBridgeSessionKey) {
+        flows.insert(key)
+    }
 }
 
-// MARK: - UDP Session Registry
+// MARK: - Full Cone EIM Registry
 
-/// A thread‑confined registry of active UDP sessions indexed by 4‑tuple.
+/// An endpoint‑independent mapping registry that ties each local
+/// 2‑tuple `(SrcIP, SrcPort)` to a single `UdpBridgeSession`.
+///
+/// This is the core data structure that enables Full Cone NAT:
+/// - **EIM**: Lookup by `(srcIP, srcPort)` — one session, many flows.
+/// - **EIF**: Lookup by `(dstIP, dstPort)` on the inbound path — any
+///   remote host targeting a mapped endpoint can punch through.
 public final class UdpBridgeSessionRegistry {
-    private var storage: [UdpBridgeSessionKey: UdpBridgeSession] = [:]
+    /// Primary index: EIM endpoint → session.
+    private var eimStorage: [UdpEIMEndpoint: UdpBridgeSession] = [:]
+
+    /// Reverse index: individual 4‑tuple flows → EIM endpoint (for
+    /// unsolicited inbound EIF packet matching).
+    private var eifIndex: [UdpBridgeSessionKey: UdpEIMEndpoint] = [:]
 
     public init() {}
 
+    // MARK: - EIM Lookup (Primary)
+
+    /// Looks up the session for a given 2‑tuple endpoint.
+    /// - Returns: The session if one exists, or `nil`.
+    public func lookup(eim: UdpEIMEndpoint) -> UdpBridgeSession? {
+        eimStorage[eim]
+    }
+
+    /// Legacy lookup by 4‑tuple — maps to the EIM endpoint first.
     public func lookup(_ key: UdpBridgeSessionKey) -> UdpBridgeSession? {
-        storage[key]
+        eimStorage[key.eim]
     }
 
+    // MARK: - EIF Lookup (Unsolicited Inbound)
+
+    /// Matches an inbound packet from ANY remote host against active
+    /// EIM endpoints.  Implements Endpoint‑Independent Filtering:
+    /// if any EIM endpoint has the target `(dstIP, dstPort)` as a
+    /// registered flow, the packet is forwarded.
+    ///
+    /// - Parameter dstIP: The destination IP from the inbound packet
+    ///   (i.e., our allocated outbound proxy IP).
+    /// - Parameter dstPort: The destination port (our allocated port).
+    /// - Returns: The matching EIM session, or `nil` if no match.
+    public func lookupUnsolicited(
+        dstIP: IPv4Address,
+        dstPort: UInt16
+    ) -> UdpBridgeSession? {
+        // Walk all EIF entries; a matching (dstIP, dstPort) as a
+        // destination coordinate means this packet targets our client.
+        for (flowKey, eimKey) in eifIndex {
+            if flowKey.destinationIP == dstIP && flowKey.destinationPort == dstPort {
+                return eimStorage[eimKey]
+            }
+        }
+        return nil
+    }
+
+    /// Legacy reverse lookup (kept for API compatibility).
     public func lookup(reverseOf key: UdpBridgeSessionKey) -> UdpBridgeSession? {
-        storage[key.reversed]
+        lookup(key.reversed)
     }
 
-    public func register(_ session: UdpBridgeSession) {
-        storage[session.key] = session
+    // MARK: - Registration
+
+    /// Registers a new session or updates an existing one with a new flow.
+    ///
+    /// - Returns: `true` if this is a new EIM endpoint (first flow),
+    ///   `false` if the endpoint already existed (reused).
+    @discardableResult
+    public func register(_ session: UdpBridgeSession) -> Bool {
+        let isNew = (eimStorage[session.eim] == nil)
+        eimStorage[session.eim] = session
+        for flow in session.flows {
+            eifIndex[flow] = session.eim
+        }
+        return isNew
     }
 
+    /// Registers a new 4‑tuple flow under an existing EIM endpoint.
+    /// - Returns: `true` if the flow was new, `false` if it already existed.
+    @discardableResult
+    public func registerFlow(
+        _ flowKey: UdpBridgeSessionKey,
+        in session: UdpBridgeSession
+    ) -> Bool {
+        let isNew = !session.flows.contains(flowKey)
+        session.registerFlow(flowKey)
+        eifIndex[flowKey] = session.eim
+        return isNew
+    }
+
+    // MARK: - Removal
+
+    /// Removes a session by EIM endpoint.
+    @discardableResult
+    public func remove(eim: UdpEIMEndpoint) -> UdpBridgeSession? {
+        guard let session = eimStorage.removeValue(forKey: eim) else {
+            return nil
+        }
+        for flow in session.flows {
+            eifIndex.removeValue(forKey: flow)
+        }
+        return session
+    }
+
+    /// Legacy removal by 4‑tuple key.
     @discardableResult
     public func remove(_ key: UdpBridgeSessionKey) -> UdpBridgeSession? {
-        storage.removeValue(forKey: key)
+        let eim = key.eim
+        guard let session = eimStorage[eim] else { return nil }
+        session.flows.remove(key)
+        eifIndex.removeValue(forKey: key)
+        if session.flows.isEmpty {
+            eimStorage.removeValue(forKey: eim)
+        }
+        return session
     }
 
-    public var count: Int { storage.count }
-    public var isEmpty: Bool { storage.isEmpty }
+    // MARK: - Statistics
 
-    public func removeAll() { storage.removeAll() }
+    public var count: Int { eimStorage.count }
+    public var totalFlows: Int { eifIndex.count }
+    public var isEmpty: Bool { eimStorage.isEmpty }
+
+    public func removeAll() {
+        eimStorage.removeAll()
+        eifIndex.removeAll()
+    }
+
+    // MARK: - Idle Sweep
+
+    /// Removes all sessions that have been idle for longer than the
+    /// specified interval.
+    ///
+    /// - Parameter olderThan: The cutoff time.
+    /// - Returns: The number of purged sessions.
+    @discardableResult
+    public func purgeIdle(olderThan cutoff: Date) -> Int {
+        let stale = eimStorage.filter { $0.value.lastActivity < cutoff }
+        for (eim, session) in stale {
+            for flow in session.flows {
+                eifIndex.removeValue(forKey: flow)
+            }
+            eimStorage.removeValue(forKey: eim)
+        }
+        return stale.count
+    }
 }
 
 // MARK: - UDP Header
 
 /// Parsed fields of a UDP datagram header (RFC 768).
-///
-/// The UDP header is exactly 8 bytes:
-/// ```
-/// [0…1] Source Port      (big‑endian UInt16)
-/// [2…3] Destination Port (big‑endian UInt16)
-/// [4…5] Length           (header + payload, big‑endian UInt16)
-/// [6…7] Checksum         (big‑endian UInt16)
-/// ```
 public struct UDPHeader: Sendable, Equatable {
     public let sourcePort: UInt16
     public let destinationPort: UInt16
@@ -131,7 +313,6 @@ public struct UDPHeader: Sendable, Equatable {
     public let checksum: UInt16
     public let payload: Data
 
-    /// Fixed size of the UDP header in bytes.
     public static let headerSize = 8
 }
 
@@ -145,12 +326,6 @@ public enum UDPParser {
         case lengthMismatch(declared: Int, actual: Int)
     }
 
-    /// Parses a UDP header and payload from raw bytes.
-    ///
-    /// - Parameter data: The transport‑layer bytes (UDP header + payload).
-    /// - Returns: A parsed `UDPHeader`.
-    /// - Throws: `ParseError` if the data is too short or the declared
-    ///   length does not match.
     public static func parse(_ data: Data) throws -> UDPHeader {
         guard data.count >= UDPHeader.headerSize else {
             throw ParseError.insufficientData(
@@ -186,19 +361,8 @@ public enum UDPParser {
 // MARK: - UDP Checksum
 
 /// Internet checksum computation for UDP over IPv4 (RFC 768).
-///
-/// The pseudo‑header is identical to TCP's, except the protocol field
-/// carries 17 (UDP) instead of 6 (TCP).
 public enum UDPChecksum {
 
-    /// Computes the UDP checksum for an IPv4 pseudo‑header.
-    ///
-    /// - Parameters:
-    ///   - sourceAddr: IPv4 source address.
-    ///   - destAddr: IPv4 destination address.
-    ///   - udpSegment: The complete UDP segment (header + payload) with
-    ///     the checksum field zeroed.
-    /// - Returns: The 16‑bit one's‑complement checksum.
     public static func computeIPv4(
         sourceAddr: IPv4Address,
         destAddr: IPv4Address,
@@ -209,17 +373,14 @@ public enum UDPChecksum {
 
         var sum = ChecksumAccumulator()
 
-        // IPv4 pseudo‑header.
         sum.add(UInt16(truncatingIfNeeded: srcUInt32 >> 16))
         sum.add(UInt16(truncatingIfNeeded: srcUInt32))
         sum.add(UInt16(truncatingIfNeeded: dstUInt32 >> 16))
         sum.add(UInt16(truncatingIfNeeded: dstUInt32))
-        sum.add(UInt16(17))                      // Protocol = UDP
-        sum.add(UInt16(udpSegment.count))        // UDP Length
+        sum.add(UInt16(17))
+        sum.add(UInt16(udpSegment.count))
 
-        // UDP segment (header + payload).
         sum.add(bytes: udpSegment)
-
         return sum.finalize()
     }
 
@@ -233,7 +394,6 @@ public enum UDPChecksum {
 
 // MARK: - Checksum Accumulator
 
-/// One's‑complement accumulator with end‑around carry.
 private struct ChecksumAccumulator {
     private var value: UInt32 = 0
 
@@ -265,19 +425,9 @@ private struct ChecksumAccumulator {
 /// Builds complete IPv4‑wrapped UDP packets for TUN reply injection.
 public enum UDPPacketBuilder {
 
-    /// Fixed IPv4 header size (no options).
     private static let ipv4HeaderSize = 20
 
-    /// Builds a complete IPv4 packet containing a UDP datagram with a
-    /// correct checksum.
-    ///
-    /// - Parameters:
-    ///   - srcIP: Source IPv4 address (server side).
-    ///   - srcPort: Source UDP port (server side).
-    ///   - dstIP: Destination IPv4 address (client side).
-    ///   - dstPort: Destination UDP port (client side).
-    ///   - payload: The inner UDP payload bytes.
-    /// - Returns: A complete IPv4 packet ready for `packetFlow.writePackets`.
+    /// Builds a complete IPv4 packet containing a UDP datagram.
     public static func buildInboundUdpPacket(
         srcIP: IPv4Address,
         srcPort: UInt16,
@@ -285,28 +435,21 @@ public enum UDPPacketBuilder {
         dstPort: UInt16,
         payload: Data
     ) -> Data {
-        // ---- Build UDP header (checksum zeroed) -----------------------
         let udpLength = UInt16(UDPHeader.headerSize + payload.count)
         var udpSegment = [UInt8](repeating: 0, count: Int(udpLength))
 
-        // Source Port.
         udpSegment[0] = UInt8(truncatingIfNeeded: srcPort >> 8)
         udpSegment[1] = UInt8(truncatingIfNeeded: srcPort)
-        // Destination Port.
         udpSegment[2] = UInt8(truncatingIfNeeded: dstPort >> 8)
         udpSegment[3] = UInt8(truncatingIfNeeded: dstPort)
-        // Length.
         udpSegment[4] = UInt8(truncatingIfNeeded: udpLength >> 8)
         udpSegment[5] = UInt8(truncatingIfNeeded: udpLength)
-        // Checksum field zeroed for computation.
         udpSegment[6] = 0
         udpSegment[7] = 0
-        // Payload.
         for (i, byte) in payload.enumerated() {
             udpSegment[UDPHeader.headerSize + i] = byte
         }
 
-        // ---- Compute UDP checksum -------------------------------------
         let checksum = UDPChecksum.computeIPv4(
             sourceAddr: srcIP,
             destAddr: dstIP,
@@ -315,38 +458,26 @@ public enum UDPPacketBuilder {
         udpSegment[6] = UInt8(truncatingIfNeeded: checksum >> 8)
         udpSegment[7] = UInt8(truncatingIfNeeded: checksum)
 
-        // ---- Build IPv4 header ----------------------------------------
         let totalLen = ipv4HeaderSize + udpSegment.count
         var packet = [UInt8](repeating: 0, count: totalLen)
 
-        // Version (4) | IHL (5).
         packet[0] = 0x45
-        // ToS.
         packet[1] = 0x00
-        // Total Length.
         packet[2] = UInt8(truncatingIfNeeded: totalLen >> 8)
         packet[3] = UInt8(truncatingIfNeeded: totalLen)
-        // Identification (0).
         packet[4] = 0x00; packet[5] = 0x00
-        // Flags + Fragment Offset (0).
         packet[6] = 0x00; packet[7] = 0x00
-        // TTL (64).
         packet[8] = 0x40
-        // Protocol = UDP (17).
         packet[9] = 17
-        // Header Checksum (0 — kernel fills it for TUN).
         packet[10] = 0x00; packet[11] = 0x00
-        // Source Address.
         packet[12] = srcIP.octet0
         packet[13] = srcIP.octet1
         packet[14] = srcIP.octet2
         packet[15] = srcIP.octet3
-        // Destination Address.
         packet[16] = dstIP.octet0
         packet[17] = dstIP.octet1
         packet[18] = dstIP.octet2
         packet[19] = dstIP.octet3
-        // UDP segment.
         for (i, byte) in udpSegment.enumerated() {
             packet[ipv4HeaderSize + i] = byte
         }
@@ -355,29 +486,47 @@ public enum UDPPacketBuilder {
     }
 }
 
-// MARK: - TUN2UdpBridge
+// MARK: - TUN2UdpBridge (Full Cone NAT)
 
-/// A user‑space UDP‑session‑aware bridge between raw IP packets (TUN layer)
-/// and outbound proxy transports.
+/// A user‑space Full Cone NAT (Type A) UDP session bridge.
 ///
-/// All session state is guarded by the caller's serial execution context —
-/// typically a single SwiftNIO `EventLoop` or a dedicated `DispatchQueue`.
+/// Implements RFC 4787 Endpoint‑Independent Mapping (EIM) and Endpoint‑
+/// Independent Filtering (EIF).  Each local `(SrcIP, SrcPort)` 2‑tuple
+/// maps to a single outbound proxy socket; any external host can send
+/// unsolicited packets to the mapped port and they will be forwarded
+/// to the internal client.
 public final class TUN2UdpBridge: @unchecked Sendable {
 
     /// Result of processing an inbound IP packet.
     public enum ProcessResult: Sendable {
-        /// Forward the UDP payload to the outbound proxy for the given session.
-        case forward(session: UdpBridgeSessionKey, payload: Data)
-        /// A reply IP packet to write back to the TUN interface.
+        /// Forward the UDP payload to the outbound proxy.
+        /// - eim: The EIM endpoint for outbound channel selection.
+        /// - session: The 4‑tuple flow key for reply routing.
+        /// - payload: The raw UDP payload bytes.
+        /// - isNewMapping: `true` if this is a new EIM mapping
+        ///   (triggers outbound socket allocation).
+        case forward(
+            eim: UdpEIMEndpoint,
+            session: UdpBridgeSessionKey,
+            payload: Data,
+            isNewMapping: Bool
+        )
+
+        /// A complete IPv4 reply packet for TUN injection.
         case reply(Data)
-        /// Packet handled internally; no external action required.
+
+        /// Packet handled; no external action required.
         case none
     }
 
-    // MARK: - Session Registry
+    // MARK: - Registry
 
-    /// The NAT table mapping 4‑tuples to virtual UDP sessions.
+    /// The Full Cone NAT table mapping 2‑tuple endpoints to sessions.
     public let registry: UdpBridgeSessionRegistry
+
+    /// Idle timeout in seconds.  Sessions idle longer than this are
+    /// eligible for eviction.
+    public var idleTimeout: TimeInterval = 30
 
     // MARK: - Initialisation
 
@@ -385,27 +534,24 @@ public final class TUN2UdpBridge: @unchecked Sendable {
         self.registry = UdpBridgeSessionRegistry()
     }
 
-    // MARK: - Inbound Processing
+    // MARK: - Inbound Processing (TUN → Proxy)
 
-    /// Processes a raw IP datagram from the TUN read path.
+    /// Processes a raw IP datagram from the TUN read path using
+    /// Endpoint‑Independent Mapping.
     ///
-    /// - Parameter data: The raw IP packet (including IP header).
-    /// - Returns: A `ProcessResult` indicating the required next action.
-    /// - Throws: `IPPacketParser.ParseError` or `UDPParser.ParseError` if
-    ///   the packet is malformed.
+    /// If the source endpoint `(srcIP, srcPort)` already has an active
+    /// EIM session, it is reused regardless of the destination.  If not,
+    /// a new EIM mapping is allocated.
     @discardableResult
     public func processInbound(_ data: Data) throws -> ProcessResult {
         let packet = try IPPacketParser.parse(data)
 
-        // Only UDP is handled by this bridge.
         guard packet.protocolNumber == .udp else {
             return .none
         }
 
-        // Extract source/destination addresses.
         let (srcAddr, dstAddr) = extractAddresses(from: packet)
 
-        // Parse UDP header + payload.
         var payloadBuffer = packet.payload
         guard let payloadBytes = payloadBuffer.readBytes(
             length: payloadBuffer.readableBytes
@@ -413,46 +559,97 @@ public final class TUN2UdpBridge: @unchecked Sendable {
         let payloadData = Data(payloadBytes)
         let udp = try UDPParser.parse(payloadData)
 
-        // Build session key.
-        let key = UdpBridgeSessionKey(
+        // Build the EIM endpoint (2‑tuple).
+        let eim = UdpEIMEndpoint(sourceIP: srcAddr, sourcePort: udp.sourcePort)
+
+        // Build the 4‑tuple flow key for reply routing.
+        let flowKey = UdpBridgeSessionKey(
             sourceIP: srcAddr,
             sourcePort: udp.sourcePort,
             destinationIP: dstAddr,
             destinationPort: udp.destinationPort
         )
 
-        // Look up or create session.
+        // EIM lookup: does this endpoint already have a session?
         let session: UdpBridgeSession
-        if let existing = registry.lookup(key) {
+        let isNewMapping: Bool
+
+        if let existing = registry.lookup(eim: eim) {
             session = existing
+            isNewMapping = false
+            // Register the new destination flow under the existing EIM.
+            registry.registerFlow(flowKey, in: session)
         } else {
-            session = UdpBridgeSession(key: key)
+            session = UdpBridgeSession(eim: eim)
+            session.registerFlow(flowKey)
             registry.register(session)
+            isNewMapping = true
         }
         session.markActivity()
 
-        return .forward(session: session.key, payload: udp.payload)
+        return .forward(
+            eim: eim,
+            session: flowKey,
+            payload: udp.payload,
+            isNewMapping: isNewMapping
+        )
+    }
+
+    // MARK: - Unsolicited Inbound Processing (EIF — Proxy → TUN)
+
+    /// Handles an inbound UDP packet from the outbound proxy channel.
+    /// Implements Endpoint‑Independent Filtering: if ANY active EIM
+    /// endpoint has a flow matching the destination `(dstIP, dstPort)`,
+    /// the packet is accepted and forwarded to the internal client.
+    ///
+    /// - Parameters:
+    ///   - srcIP: Remote server IP (from the proxy).
+    ///   - srcPort: Remote server port.
+    ///   - dstIP: The allocated outbound proxy IP (our NAT address).
+    ///   - dstPort: The allocated outbound proxy port.
+    ///   - payload: The raw UDP payload from the remote server.
+    /// - Returns: `.reply(data)` if a matching EIM session is found,
+    ///   `.none` if the packet should be dropped (no matching session).
+    public func processUnsolicitedInbound(
+        fromRemoteIP srcIP: IPv4Address,
+        fromRemotePort srcPort: UInt16,
+        toProxyIP dstIP: IPv4Address,
+        toProxyPort dstPort: UInt16,
+        payload: Data
+    ) -> ProcessResult {
+        // EIF lookup: find any EIM session that has (dstIP, dstPort)
+        // as a destination coordinate.
+        guard let session = registry.lookupUnsolicited(
+            dstIP: dstIP, dstPort: dstPort
+        ) else {
+            return .none
+        }
+
+        // Refresh session activity (bi‑directional).
+        session.markActivity()
+
+        // Build the reply packet addressed to the internal client.
+        let replyPacket = UDPPacketBuilder.buildInboundUdpPacket(
+            srcIP: srcIP,
+            srcPort: srcPort,
+            dstIP: session.eim.sourceIP,
+            dstPort: session.eim.sourcePort,
+            payload: payload
+        )
+        return .reply(replyPacket)
     }
 
     // MARK: - Reply Packet Assembly
 
-    /// Builds a complete IPv4‑wrapped UDP reply packet for injection back
-    /// into the TUN virtual interface.
-    ///
-    /// This reverses the source and destination coordinates: the original
-    /// destination becomes the source (as the server is now "sending" to
-    /// the client).
-    ///
-    /// - Parameters:
-    ///   - session: The session this reply belongs to.
-    ///   - payload: The raw UDP payload from the outbound proxy.
-    /// - Returns: A complete IPv4 packet ready for `packetFlow.writePackets`.
+    /// Builds a complete IPv4‑wrapped UDP reply packet for injection
+    /// back into the TUN virtual interface.  Uses the 4‑tuple session
+    /// key to reverse source and destination coordinates.
     public func buildReply(
         for session: UdpBridgeSessionKey,
         payload: Data
     ) -> Data {
         UDPPacketBuilder.buildInboundUdpPacket(
-            srcIP: session.destinationIP,   // reversed
+            srcIP: session.destinationIP,
             srcPort: session.destinationPort,
             dstIP: session.sourceIP,
             dstPort: session.sourcePort,
@@ -462,8 +659,8 @@ public final class TUN2UdpBridge: @unchecked Sendable {
 
     // MARK: - Static Reply Builder
 
-    /// Builds a complete IPv4‑wrapped UDP reply packet from raw 4‑tuple
-    /// coordinates.  Convenience wrapper around `UDPPacketBuilder`.
+    /// Builds a complete IPv4‑wrapped UDP reply packet from raw
+    /// 4‑tuple coordinates.
     public static func buildInboundUdpPacket(
         srcIP: IPv4Address,
         srcPort: UInt16,
@@ -480,9 +677,18 @@ public final class TUN2UdpBridge: @unchecked Sendable {
         )
     }
 
+    // MARK: - Maintenance
+
+    /// Purges all idle sessions older than the idle timeout.
+    /// - Returns: The number of purged sessions.
+    @discardableResult
+    public func purgeIdle() -> Int {
+        let cutoff = Date().addingTimeInterval(-idleTimeout)
+        return registry.purgeIdle(olderThan: cutoff)
+    }
+
     // MARK: - Helpers
 
-    /// Extracts source and destination IPv4 addresses from an `IPPacket`.
     private func extractAddresses(
         from packet: IPPacket
     ) -> (source: IPv4Address, destination: IPv4Address) {
@@ -490,7 +696,6 @@ public final class TUN2UdpBridge: @unchecked Sendable {
         case .ipv4(let header):
             return (header.sourceAddress, header.destinationAddress)
         case .ipv6:
-            // IPv6 UDP is not yet handled; return zero addresses.
             return (
                 IPv4Address(0, 0, 0, 0),
                 IPv4Address(0, 0, 0, 0)

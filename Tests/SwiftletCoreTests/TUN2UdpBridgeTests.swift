@@ -263,7 +263,7 @@ struct TUN2UdpBridgeInboundTests {
             payload: payload
         )
         let result = try bridge.processInbound(pkt)
-        guard case .forward(let session, let fwdPayload) = result else {
+        guard case .forward(let eim, let session, let fwdPayload, _) = result else {
             Issue.record("Expected .forward"); return
         }
         #expect(session.sourceIP == testSrcIP)
@@ -271,6 +271,8 @@ struct TUN2UdpBridgeInboundTests {
         #expect(session.destinationIP == testDstIP)
         #expect(session.destinationPort == testDstPort)
         #expect(fwdPayload == payload)
+        #expect(eim.sourceIP == testSrcIP)
+        #expect(eim.sourcePort == testSrcPort)
     }
 
     @Test func tcpPacketReturnsNone() throws {
@@ -436,7 +438,7 @@ struct TUN2UdpBridgeRoundTripTests {
         )
         let result = try bridge.processInbound(queryPkt)
 
-        guard case .forward(let session, let fwdPayload) = result else {
+        guard case .forward(_, let session, let fwdPayload, _) = result else {
             Issue.record("Expected .forward"); return
         }
         #expect(fwdPayload == dnsQuery)

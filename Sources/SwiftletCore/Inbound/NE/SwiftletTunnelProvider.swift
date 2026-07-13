@@ -286,8 +286,8 @@ open class SwiftletTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         // If TCP parsing failed, try UDP.
         if let udpResult = try? udpBridge.processInbound(data) {
             switch udpResult {
-            case .forward(let session, let payload):
-                handleUDPForward(session: session, payload: payload)
+            case .forward(let eim, let session, let payload, let isNew):
+                handleUDPForward(eim: eim, session: session, payload: payload, isNewMapping: isNew)
 
             case .reply(let replyData):
                 replyPackets.append(replyData)
@@ -523,8 +523,10 @@ open class SwiftletTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     /// writes a simple echo/direct reply for local testing; production
     /// deployments would route through a `UdpAssociationManager`.
     private func handleUDPForward(
+        eim: UdpEIMEndpoint,
         session: UdpBridgeSessionKey,
-        payload: Data
+        payload: Data,
+        isNewMapping: Bool
     ) {
         // In a full deployment, this would forward through the outbound
         // proxy's UDP association (e.g., WireGuard, Hysteria2, or a
